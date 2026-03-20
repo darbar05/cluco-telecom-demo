@@ -1,0 +1,31 @@
+# OpenTelemetry Collector - receives OTLP from agent-observability SDK
+# Forwards traces to Cluco backend or other backends (Jaeger, Tempo, etc.)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+exporters:
+  # Forward to Cluco backend (convert OTLP -> HTTP)
+  # Custom exporter would need to be implemented; for now use debug
+  debug:
+    verbosity: basic
+  # Or use logging for development
+  logging:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]

@@ -1,0 +1,9 @@
+# LECO (legal product) — minimal config for Cluco Observability
+# Use with ObservabilityConfig.from_properties("config/leco.properties")
+
+cluco.observability.enabled=true
+cluco.observability.product_id=leco
+cluco.observability.service_name=leco-legal-agent
+cluco.observability.exporter=http
+cluco.observability.backend_url=http://localhost:9410
+cluco.observability.backend_path=/api/v1/traces

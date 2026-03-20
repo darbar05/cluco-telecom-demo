@@ -1,0 +1,37 @@
+# Environment files (contain secrets)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+*.egg
+venv/
+
+# Node
+node_modules/
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+.claude/
+
+# Render
+.render/
+
+# Excluded directories
+portfolio/
+bkp_portfolio/
+sample_ss/

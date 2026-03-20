@@ -1,0 +1,3 @@
+-- Create database (run as postgres user)
+-- CREATE DATABASE cluco_observability;
+-- Tables are created by SQLAlchemy on first run

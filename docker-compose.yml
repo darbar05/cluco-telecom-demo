@@ -1,0 +1,117 @@
+version: "3.9"
+
+# ==================================================================
+#  Cluco Observability + Telecom Agent — Docker Compose
+# ==================================================================
+#
+#  Services:
+#    mongodb          :27017   MongoDB for Cluco storage
+#    cluco-backend    :9410    Cluco Observability FastAPI backend
+#    cluco-ui         :9411    Cluco Observability React dashboard
+#    telecom-backend  :9412    TelcoAssist chat agent FastAPI backend
+#    telecom-ui       :9413    TelcoAssist React chat interface
+#
+#  Usage:
+#    docker-compose up --build        Start everything
+#    docker-compose up -d             Start detached
+#    docker-compose logs -f           Follow all logs
+#    docker-compose down              Stop and remove containers
+#
+#  Environment:
+#    Copy .env.docker.example to .env.docker and fill in your keys,
+#    or set OPENAI_API_KEY / PINECONE_API_KEY as host env vars.
+# ==================================================================
+
+services:
+
+  # ── MongoDB ──────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: cluco-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Cluco Observability Backend ──────────────────────────────────
+  cluco-backend:
+    container_name: cluco-backend
+    build:
+      context: ./cluco-observability
+      dockerfile: backend/Dockerfile
+    ports:
+      - "9410:9410"
+    env_file:
+      - .env.docker
+    environment:
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DB=cluco_observability
+      - PORT=9410
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9410/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Cluco Observability UI ───────────────────────────────────────
+  cluco-ui:
+    container_name: cluco-ui
+    build:
+      context: ./cluco-observability/ui
+      dockerfile: Dockerfile
+    ports:
+      - "9411:9411"
+    environment:
+      - VITE_BACKEND_URL=http://cluco-backend:9410
+    depends_on:
+      - cluco-backend
+
+  # ── Telecom Agent Backend ────────────────────────────────────────
+  telecom-backend:
+    container_name: telecom-backend
+    build:
+      context: ./telecom-agent/backend
+      dockerfile: Dockerfile
+    ports:
+      - "9412:9412"
+    env_file:
+      - .env.docker
+    environment:
+      - CLUCO_OBS_BACKEND_URL=http://cluco-backend:9410
+      - CLUCO_OBS_PRODUCT_ID=telecom-agent
+      - PINECONE_INDEX_NAME=telecom-kb
+      - PYTHONPATH=/cluco-sdk
+    volumes:
+      - ./cluco-observability/sdk:/cluco-sdk:ro
+    command: >
+      sh -c "pip install /cluco-sdk 2>/dev/null; python -m app.chat_server"
+    depends_on:
+      cluco-backend:
+        condition: service_healthy
+
+  # ── Telecom Agent Chat UI ────────────────────────────────────────
+  telecom-ui:
+    container_name: telecom-ui
+    build:
+      context: ./telecom-agent/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "9413:9413"
+    environment:
+      - VITE_CHAT_API_URL=http://localhost:9412
+      - VITE_CLUCO_API_URL=http://localhost:9410
+    depends_on:
+      - telecom-backend
+
+volumes:
+  mongo-data:
+    driver: local

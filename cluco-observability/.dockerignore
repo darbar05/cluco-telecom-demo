@@ -1,0 +1,9 @@
+ui/
+backend/venv/
+backend/__pycache__/
+backend/logs/
+backend/.env
+backend/tests/
+backend/.pytest_cache/
+sdk/__pycache__/
+sdk/*.egg-info/

@@ -1,0 +1,343 @@
+{
+  "_description": "Model pricing configuration for Cluco Observability cost estimation. All costs are per 1,000 tokens in USD. To add a new model, add an entry with input and output costs. Set output to 0 for embedding models.",
+  "_updated": "2026-02-14",
+
+  "models": {
+    "gpt-4o": {
+      "provider": "openai",
+      "input": 0.0025,
+      "output": 0.01,
+      "type": "llm"
+    },
+    "gpt-4o-mini": {
+      "provider": "openai",
+      "input": 0.00015,
+      "output": 0.0006,
+      "type": "llm"
+    },
+    "gpt-4o-2024-11-20": {
+      "provider": "openai",
+      "input": 0.0025,
+      "output": 0.01,
+      "type": "llm"
+    },
+    "gpt-4o-2024-08-06": {
+      "provider": "openai",
+      "input": 0.0025,
+      "output": 0.01,
+      "type": "llm"
+    },
+    "gpt-4o-2024-05-13": {
+      "provider": "openai",
+      "input": 0.005,
+      "output": 0.015,
+      "type": "llm"
+    },
+    "gpt-4.1": {
+      "provider": "openai",
+      "input": 0.002,
+      "output": 0.008,
+      "type": "llm"
+    },
+    "gpt-4.1-mini": {
+      "provider": "openai",
+      "input": 0.0004,
+      "output": 0.0016,
+      "type": "llm"
+    },
+    "gpt-4.1-nano": {
+      "provider": "openai",
+      "input": 0.0001,
+      "output": 0.0004,
+      "type": "llm"
+    },
+    "gpt-4-turbo": {
+      "provider": "openai",
+      "input": 0.01,
+      "output": 0.03,
+      "type": "llm"
+    },
+    "gpt-4-turbo-2024-04-09": {
+      "provider": "openai",
+      "input": 0.01,
+      "output": 0.03,
+      "type": "llm"
+    },
+    "gpt-4": {
+      "provider": "openai",
+      "input": 0.03,
+      "output": 0.06,
+      "type": "llm"
+    },
+    "gpt-4-32k": {
+      "provider": "openai",
+      "input": 0.06,
+      "output": 0.12,
+      "type": "llm"
+    },
+    "gpt-3.5-turbo": {
+      "provider": "openai",
+      "input": 0.0005,
+      "output": 0.0015,
+      "type": "llm"
+    },
+    "gpt-3.5-turbo-0125": {
+      "provider": "openai",
+      "input": 0.0005,
+      "output": 0.0015,
+      "type": "llm"
+    },
+    "gpt-5": {
+      "provider": "openai",
+      "input": 0.00125,
+      "output": 0.01,
+      "type": "llm"
+    },
+    "gpt-5-mini": {
+      "provider": "openai",
+      "input": 0.00025,
+      "output": 0.002,
+      "type": "llm"
+    },
+    "gpt-5-nano": {
+      "provider": "openai",
+      "input": 0.00005,
+      "output": 0.0004,
+      "type": "llm"
+    },
+    "o1": {
+      "provider": "openai",
+      "input": 0.015,
+      "output": 0.06,
+      "type": "llm"
+    },
+    "o1-mini": {
+      "provider": "openai",
+      "input": 0.003,
+      "output": 0.012,
+      "type": "llm"
+    },
+    "o1-preview": {
+      "provider": "openai",
+      "input": 0.015,
+      "output": 0.06,
+      "type": "llm"
+    },
+    "o3": {
+      "provider": "openai",
+      "input": 0.002,
+      "output": 0.008,
+      "type": "llm"
+    },
+    "o3-mini": {
+      "provider": "openai",
+      "input": 0.0011,
+      "output": 0.0044,
+      "type": "llm"
+    },
+    "o4-mini": {
+      "provider": "openai",
+      "input": 0.0011,
+      "output": 0.0044,
+      "type": "llm"
+    },
+
+    "claude-3-5-sonnet": {
+      "provider": "anthropic",
+      "input": 0.003,
+      "output": 0.015,
+      "type": "llm"
+    },
+    "claude-3-5-sonnet-20241022": {
+      "provider": "anthropic",
+      "input": 0.003,
+      "output": 0.015,
+      "type": "llm"
+    },
+    "claude-3-7-sonnet": {
+      "provider": "anthropic",
+      "input": 0.003,
+      "output": 0.015,
+      "type": "llm"
+    },
+    "claude-3-5-haiku": {
+      "provider": "anthropic",
+      "input": 0.001,
+      "output": 0.005,
+      "type": "llm"
+    },
+    "claude-3-haiku": {
+      "provider": "anthropic",
+      "input": 0.00025,
+      "output": 0.00125,
+      "type": "llm"
+    },
+    "claude-3-opus": {
+      "provider": "anthropic",
+      "input": 0.015,
+      "output": 0.075,
+      "type": "llm"
+    },
+    "claude-3-sonnet": {
+      "provider": "anthropic",
+      "input": 0.003,
+      "output": 0.015,
+      "type": "llm"
+    },
+    "claude-sonnet-4": {
+      "provider": "anthropic",
+      "input": 0.003,
+      "output": 0.015,
+      "type": "llm"
+    },
+    "claude-sonnet-4.5": {
+      "provider": "anthropic",
+      "input": 0.003,
+      "output": 0.015,
+      "type": "llm"
+    },
+    "claude-haiku-4.5": {
+      "provider": "anthropic",
+      "input": 0.001,
+      "output": 0.005,
+      "type": "llm"
+    },
+    "claude-opus-4.5": {
+      "provider": "anthropic",
+      "input": 0.005,
+      "output": 0.025,
+      "type": "llm"
+    },
+    "claude-opus-4.1": {
+      "provider": "anthropic",
+      "input": 0.015,
+      "output": 0.075,
+      "type": "llm"
+    },
+
+    "gemini-1.5-pro": {
+      "provider": "google",
+      "input": 0.00125,
+      "output": 0.005,
+      "type": "llm"
+    },
+    "gemini-1.5-flash": {
+      "provider": "google",
+      "input": 0.000075,
+      "output": 0.0003,
+      "type": "llm"
+    },
+    "gemini-2.0-flash": {
+      "provider": "google",
+      "input": 0.0001,
+      "output": 0.0004,
+      "type": "llm"
+    },
+    "gemini-2.5-pro": {
+      "provider": "google",
+      "input": 0.00125,
+      "output": 0.01,
+      "type": "llm"
+    },
+    "gemini-2.5-flash": {
+      "provider": "google",
+      "input": 0.00015,
+      "output": 0.0006,
+      "type": "llm"
+    },
+
+    "llama-3.1-70b": {
+      "provider": "meta",
+      "input": 0.00035,
+      "output": 0.0004,
+      "type": "llm"
+    },
+    "llama-3.1-8b": {
+      "provider": "meta",
+      "input": 0.00005,
+      "output": 0.00008,
+      "type": "llm"
+    },
+    "llama-3.3-70b": {
+      "provider": "meta",
+      "input": 0.00035,
+      "output": 0.0004,
+      "type": "llm"
+    },
+
+    "mistral-large": {
+      "provider": "mistral",
+      "input": 0.002,
+      "output": 0.006,
+      "type": "llm"
+    },
+    "mistral-small": {
+      "provider": "mistral",
+      "input": 0.0002,
+      "output": 0.0006,
+      "type": "llm"
+    },
+    "mistral-medium": {
+      "provider": "mistral",
+      "input": 0.0027,
+      "output": 0.0081,
+      "type": "llm"
+    },
+    "codestral": {
+      "provider": "mistral",
+      "input": 0.0003,
+      "output": 0.0009,
+      "type": "llm"
+    },
+
+    "deepseek-v3": {
+      "provider": "deepseek",
+      "input": 0.00027,
+      "output": 0.0011,
+      "type": "llm"
+    },
+    "deepseek-r1": {
+      "provider": "deepseek",
+      "input": 0.00055,
+      "output": 0.0022,
+      "type": "llm"
+    },
+
+    "text-embedding-3-small": {
+      "provider": "openai",
+      "input": 0.00002,
+      "output": 0.0,
+      "type": "embedding"
+    },
+    "text-embedding-3-large": {
+      "provider": "openai",
+      "input": 0.00013,
+      "output": 0.0,
+      "type": "embedding"
+    },
+    "text-embedding-ada-002": {
+      "provider": "openai",
+      "input": 0.0001,
+      "output": 0.0,
+      "type": "embedding"
+    },
+    "voyage-3": {
+      "provider": "voyage",
+      "input": 0.00006,
+      "output": 0.0,
+      "type": "embedding"
+    },
+    "voyage-3-lite": {
+      "provider": "voyage",
+      "input": 0.00002,
+      "output": 0.0,
+      "type": "embedding"
+    },
+    "voyage-code-3": {
+      "provider": "voyage",
+      "input": 0.00018,
+      "output": 0.0,
+      "type": "embedding"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# Any Cluco product — minimal config template
+# Copy and set product_id + service_name for your product
+
+cluco.observability.enabled=true
+cluco.observability.product_id=YOUR_PRODUCT_ID
+cluco.observability.service_name=YOUR_SERVICE_NAME
+cluco.observability.exporter=http
+cluco.observability.backend_url=http://localhost:9410
+cluco.observability.backend_path=/api/v1/traces

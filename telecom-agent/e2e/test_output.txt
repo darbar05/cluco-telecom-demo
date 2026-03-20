@@ -1,0 +1,111 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.2, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\gpradeepreddy05\AppData\Local\Programs\Python\Python311\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\gpradeepreddy05\Documents\New_COde\demo\telecom-agent\e2e
+configfile: pytest.ini
+plugins: anyio-4.12.1, langsmith-0.7.1, base-url-2.1.0, playwright-0.7.2
+collecting ... collected 1 item
+
+test_full_demo_workflow.py::test_full_demo_workflow[chromium]   Screenshot: C:\Users\gpradeepreddy05\Documents\New_COde\demo\telecom-agent\e2e\screenshots\01_telecom_chat_loaded.png
+  Screenshot: C:\Users\gpradeepreddy05\Documents\New_COde\demo\telecom-agent\e2e\screenshots\02_bad_response.png
+  Screenshot: C:\Users\gpradeepreddy05\Documents\New_COde\demo\telecom-agent\e2e\screenshots\03_feedback_submitted.png
+FAILED
+
+================================== FAILURES ===================================
+______________________ test_full_demo_workflow[chromium] ______________________
+
+page = <Page url='http://localhost:9411/traces'>
+screenshots_dir = WindowsPath('C:/Users/gpradeepreddy05/Documents/New_COde/demo/telecom-agent/e2e/screenshots')
+
+    def test_full_demo_workflow(page: Page, screenshots_dir: Path):
+        """
+        End-to-end: Bad prompt -> Feedback -> Evaluation -> AI Assistant ->
+        SME labeling -> Prompt Optimizer -> Compare old vs optimized.
+        """
+        page.set_default_timeout(NAVIGATION_TIMEOUT)
+    
+        # -------------------------------------------------------------------------
+        # Phase 1: Bad prompt -> Response -> Feedback
+        # -------------------------------------------------------------------------
+        page.goto(TELECOM_CHAT_URL)
+        page.wait_for_load_state("networkidle")
+        _wait(page, 1500)
+        _screenshot(page, "01_telecom_chat_loaded.png", screenshots_dir)
+    
+        # Ensure V1 (bad routing) is selected
+        v1_btn = page.get_by_role("button", name="V1")
+        if v1_btn.is_visible(timeout=3000):
+            v1_btn.click()
+            _wait(page, 800)
+    
+        # Send query
+        textarea = page.get_by_placeholder("Ask about plans, devices, billing, or support...")
+        textarea.fill(DEVICE_UPGRADE_QUERY)
+        textarea.press("Enter")
+    
+        # Wait for response
+        page.wait_for_selector("[title='Bad response']", timeout=RESPONSE_WAIT_TIMEOUT)
+        _wait(page, 1000)
+        _screenshot(page, "02_bad_response.png", screenshots_dir)
+    
+        # Thumbs down
+        page.locator("[title='Bad response']").first.click()
+        _wait(page, 1500)
+        _screenshot(page, "03_feedback_submitted.png", screenshots_dir)
+    
+        # Extract trace_id for later
+        trace_id = None
+        trace_links = page.locator('a[href*="/trace/"]')
+        if trace_links.count() > 0:
+            href = trace_links.first.get_attribute("href") or ""
+            if "trace/" in href:
+                trace_id = href.split("trace/")[-1].split("/")[0].split("?")[0]
+    
+        # -------------------------------------------------------------------------
+        # Phase 2: Cluco traces -> filter negative -> export to dataset
+        # -------------------------------------------------------------------------
+>       page.goto(CLUCO_TRACES_URL)
+
+test_full_demo_workflow.py:110: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+..\..\..\..\..\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\sync_api\_generated.py:9054: in goto
+    self._sync(
+..\..\..\..\..\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_page.py:552: in goto
+    return await self._main_frame.goto(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\..\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_frame.py:153: in goto
+    await self._channel.send(
+..\..\..\..\..\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_connection.py:69: in send
+    return await self._connection.wrap_api_call(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <playwright._impl._connection.Connection object at 0x0000018772DD3D10>
+cb = <function Channel.send.<locals>.<lambda> at 0x0000018773085F80>
+is_internal = False, title = None
+
+    async def wrap_api_call(
+        self, cb: Callable[[], Any], is_internal: bool = False, title: str = None
+    ) -> Any:
+        if self._api_zone.get():
+            return await cb()
+        task = asyncio.current_task(self._loop)
+        st: List[inspect.FrameInfo] = getattr(
+            task, "__pw_stack__", None
+        ) or inspect.stack(0)
+    
+        parsed_st = _extract_stack_trace_information_from_stack(st, is_internal, title)
+        self._api_zone.set(parsed_st)
+        try:
+            return await cb()
+        except Exception as error:
+>           raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+E           playwright._impl._errors.TimeoutError: Page.goto: Timeout 30000ms exceeded.
+E           Call log:
+E             - navigating to "http://localhost:9411/traces", waiting until "load"
+
+..\..\..\..\..\AppData\Local\Programs\Python\Python311\Lib\site-packages\playwright\_impl\_connection.py:559: TimeoutError
+=========================== short test summary info ===========================
+FAILED test_full_demo_workflow.py::test_full_demo_workflow[chromium] - playwright._impl._errors.TimeoutError: Page.goto: Timeout 30000ms exceeded.
+Call log:
+  - navigating to "http://localhost:9411/traces", waiting until "load"
+======================== 1 failed in 201.34s (0:03:21) ========================
