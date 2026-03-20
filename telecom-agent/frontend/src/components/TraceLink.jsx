@@ -1,6 +1,6 @@
 import { ExternalLink } from 'lucide-react';
 
-const CLUCO_UI_URL = 'http://localhost:9411';
+const CLUCO_UI_URL = import.meta.env.VITE_CLUCO_UI_URL || 'http://localhost:9411';
 
 export default function TraceLink({ traceId }) {
   const url = `${CLUCO_UI_URL}/trace/${traceId}`;
