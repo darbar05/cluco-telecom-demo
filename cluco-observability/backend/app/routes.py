@@ -3163,9 +3163,10 @@ def compare_prompt_versions_endpoint(
 
 @router.post("/prompts/{prompt_id}/optimize")
 def optimize_prompt(prompt_id: str, body: dict = Body(...)) -> dict:
-    """Start multi-strategy prompt optimization with experiment tracking."""
+    """Run all optimization strategies (custom + DSPy) in a background thread.
+    Returns the run_id immediately so the frontend can poll for progress."""
+    import threading
     from app.storage import get_trace_store
-    from app.prompt_optimizer import run_optimization
     store = get_trace_store()
 
     dataset_id = body.get("dataset_id")
@@ -3173,29 +3174,51 @@ def optimize_prompt(prompt_id: str, body: dict = Body(...)) -> dict:
     evaluator_ids = body.get("evaluator_ids", [])
     max_iterations = min(body.get("max_iterations", 4), 10)
     optimizer_model = body.get("optimizer_model")
-    strategy = body.get("strategy", "failure_driven")
 
     if not dataset_id:
         raise HTTPException(status_code=400, detail="dataset_id required")
     if not evaluator_id and not evaluator_ids:
         raise HTTPException(status_code=400, detail="evaluator_id or evaluator_ids required")
 
-    result = run_optimization(
-        store=store,
-        prompt_id=prompt_id,
-        dataset_id=dataset_id,
-        evaluator_id=evaluator_id or (evaluator_ids[0] if evaluator_ids else ""),
-        max_iterations=max_iterations,
-        optimizer_model=optimizer_model,
-        strategy=strategy,
-        evaluator_ids=evaluator_ids if evaluator_ids else ([evaluator_id] if evaluator_id else []),
-    )
-    return result
+    import uuid as _uuid
+    run_id = str(_uuid.uuid4())[:12]
+
+    def _run_in_background():
+        try:
+            from app.storage import get_trace_store as _get_store
+            from app.prompt_optimizer import run_all_strategies_optimization
+            bg_store = _get_store()
+            run_all_strategies_optimization(
+                store=bg_store,
+                prompt_id=prompt_id,
+                dataset_id=dataset_id,
+                evaluator_id=evaluator_id or (evaluator_ids[0] if evaluator_ids else ""),
+                max_iterations=max_iterations,
+                optimizer_model=optimizer_model,
+                evaluator_ids=evaluator_ids if evaluator_ids else ([evaluator_id] if evaluator_id else []),
+                run_id=run_id,
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("Background optimization failed: %s", e)
+            try:
+                bg_store._db["optimization_runs"].update_one(
+                    {"_id": run_id},
+                    {"$set": {"status": "failed", "error": str(e)}},
+                    upsert=True,
+                )
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run_in_background, daemon=True)
+    thread.start()
+
+    return {"ok": True, "run_id": run_id, "status": "started"}
 
 
 @router.get("/prompts/optimization-runs/{run_id}")
 def get_optimization_run(run_id: str) -> dict:
-    """Get the status/result of a prompt optimization run."""
+    """Get the status/result of a prompt optimization run (supports polling)."""
     from app.storage import get_trace_store
     store = get_trace_store()
     try:
@@ -3204,6 +3227,8 @@ def get_optimization_run(run_id: str) -> dict:
             raise HTTPException(status_code=404, detail="Optimization run not found")
         doc.pop("_id", None)
         return doc
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=404, detail="Optimization run not found")
 

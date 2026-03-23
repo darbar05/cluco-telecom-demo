@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
-import { getPromptTemplates, getPromptTemplate, getPromptTemplateVersions, getPromptVersionDetail, createPromptTemplate, createPromptVersion, comparePromptVersions, optimizePrompt, getDatasets, getEvaluators, getPromptVersions, getProducts, getPipelines } from '../api'
-import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { getPromptTemplates, getPromptTemplate, getPromptTemplateVersions, getPromptVersionDetail, createPromptTemplate, createPromptVersion, comparePromptVersions, optimizePrompt, getOptimizationRun, getDatasets, getEvaluators, getPromptVersions, getProducts, getPipelines } from '../api'
+import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash, AlertTriangle, CheckCircle, XCircle, Trophy } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import FilterBar, { FilterSelect } from '../components/ui/FilterBar'
 import MarkdownRenderer from '../components/MarkdownRenderer'
@@ -28,11 +28,14 @@ export default function PromptRegistryPage() {
   const [optimizeDatasetId, setOptimizeDatasetId] = useState('')
   const [optimizeEvaluatorId, setOptimizeEvaluatorId] = useState('')
   const [optimizeMaxIter, setOptimizeMaxIter] = useState(4)
-  const [optimizeModel, setOptimizeModel] = useState('gpt-4o-mini')
+  const [optimizeModel, setOptimizeModel] = useState('gpt-4o')
   const [optimizing, setOptimizing] = useState(false)
   const [optimizeResult, setOptimizeResult] = useState(null)
+  const [optimizeRunId, setOptimizeRunId] = useState(null)
+  const [optimizeProgress, setOptimizeProgress] = useState(null)
   const [availableDatasets, setAvailableDatasets] = useState([])
   const [availableEvaluators, setAvailableEvaluators] = useState([])
+  const pollRef = useRef(null)
   const [sdkVersions, setSdkVersions] = useState([])
   const [sdkLoading, setSdkLoading] = useState(false)
   const [expandedSdkRow, setExpandedSdkRow] = useState(null)
@@ -160,10 +163,23 @@ export default function PromptRegistryPage() {
     } catch { /* ignore */ }
   }
 
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }, [])
+
+  useEffect(() => () => stopPolling(), [stopPolling])
+
   const handleOptimize = async () => {
     if (!optimizeDatasetId || !optimizeEvaluatorId || !selectedPrompt) return
     setOptimizing(true)
     setOptimizeResult(null)
+    setOptimizeProgress(null)
+    setOptimizeRunId(null)
+    stopPolling()
+
     try {
       const res = await optimizePrompt(selectedPrompt.prompt_id, {
         dataset_id: optimizeDatasetId,
@@ -171,12 +187,34 @@ export default function PromptRegistryPage() {
         max_iterations: optimizeMaxIter,
         optimizer_model: optimizeModel,
       })
-      setOptimizeResult(res.data)
-      selectPrompt(selectedPrompt.prompt_id)
+      const runId = res.data?.run_id
+      if (!runId) {
+        setOptimizeResult(res.data)
+        setOptimizing(false)
+        return
+      }
+      setOptimizeRunId(runId)
+
+      pollRef.current = setInterval(async () => {
+        try {
+          const pollRes = await getOptimizationRun(runId)
+          const data = pollRes.data
+          setOptimizeProgress(data)
+
+          if (data.status === 'completed' || data.status === 'failed') {
+            stopPolling()
+            setOptimizeResult(data)
+            setOptimizing(false)
+            if (data.status === 'completed') selectPrompt(selectedPrompt.prompt_id)
+          }
+        } catch {
+          // run not yet written — keep polling
+        }
+      }, 4000)
     } catch (e) {
       setOptimizeResult({ ok: false, error: e.response?.data?.detail || e.message || 'Optimization failed' })
+      setOptimizing(false)
     }
-    setOptimizing(false)
   }
 
   if (selectedPrompt) {
@@ -209,7 +247,7 @@ export default function PromptRegistryPage() {
                   <Sparkles size={18} className="text-violet-500" />
                   <h3 className="text-lg font-semibold text-slate-800">Optimize Prompt</h3>
                 </div>
-                <p className="text-sm text-slate-500 mt-1">Use AI to iteratively improve this prompt based on evaluation results</p>
+                <p className="text-sm text-slate-500 mt-1">Runs all strategies (custom + DSPy) and picks the best result</p>
               </div>
               <div className="p-5 space-y-4">
                 <div>
@@ -238,37 +276,147 @@ export default function PromptRegistryPage() {
                     <label className="block text-xs font-semibold text-slate-600 mb-1">Optimizer Model</label>
                     <select value={optimizeModel} onChange={e => setOptimizeModel(e.target.value)}
                       className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                      <option value="gpt-4o">gpt-4o (recommended)</option>
+                      <option value="gpt-4.1-mini">gpt-4.1-mini</option>
                       <option value="gpt-4o-mini">gpt-4o-mini</option>
-                      <option value="gpt-4o">gpt-4o</option>
                     </select>
                   </div>
                 </div>
 
-                {optimizing && (
-                  <div className="flex items-center gap-3 p-4 bg-violet-50 rounded-lg border border-violet-200">
-                    <Loader2 size={18} className="animate-spin text-violet-500" />
-                    <div>
-                      <div className="text-sm font-medium text-violet-700">Optimizing...</div>
-                      <div className="text-xs text-violet-500">This may take several minutes. Do not close this dialog.</div>
+                {/* Small dataset warning */}
+                {optimizeDatasetId && (() => {
+                  const ds = availableDatasets.find(d => d.dataset_id === optimizeDatasetId)
+                  const count = ds?.item_count || 0
+                  return count > 0 && count < 5 ? (
+                    <div className="flex items-start gap-2 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                      <AlertTriangle size={16} className="text-amber-500 mt-0.5 shrink-0" />
+                      <div className="text-xs text-amber-700">
+                        <span className="font-semibold">Small dataset ({count} items).</span> Optimization works best with 10+ items.
+                        Results may be unreliable with fewer than 5 items.
+                      </div>
                     </div>
-                  </div>
-                )}
+                  ) : null
+                })()}
 
-                {optimizeResult && (
-                  <div className={`p-4 rounded-lg border ${optimizeResult.ok ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
-                    {optimizeResult.ok ? (
+                {/* Auto-best: strategy-level live progress */}
+                {optimizing && (() => {
+                  const p = optimizeProgress
+                  const strategies = p?.strategies_completed || []
+                  const allStrategies = [
+                    { id: 'failure_driven', label: 'Failure-Driven', type: 'custom' },
+                    { id: 'instruction_refinement', label: 'Instruction Refinement', type: 'custom' },
+                    { id: 'few_shot', label: 'Few-Shot', type: 'custom' },
+                    { id: 'dspy_bootstrap', label: 'DSPy Bootstrap', type: 'dspy' },
+                    { id: 'dspy_mipro', label: 'DSPy MIPROv2', type: 'dspy' },
+                  ]
+                  const completedIds = strategies.map(s => s.strategy)
+                  const currentStrategy = p?.current_strategy
+
+                  return (
+                    <div className="space-y-3">
+                      {/* Overall status bar */}
+                      <div className="flex items-center gap-3 p-4 bg-violet-50 rounded-lg border border-violet-200">
+                        <Loader2 size={18} className="animate-spin text-violet-500" />
+                        <div className="flex-1">
+                          <div className="text-sm font-medium text-violet-700">
+                            {p?.current_phase === 'baseline' ? 'Evaluating baseline prompt...' :
+                             p?.current_phase === 'baseline_complete' ? 'Baseline evaluated. Running strategies...' :
+                             p?.current_phase === 'strategy_running' && currentStrategy
+                               ? `Running: ${allStrategies.find(s => s.id === currentStrategy)?.label || currentStrategy}...`
+                               : 'Optimizing across all strategies...'}
+                          </div>
+                          <div className="text-xs text-violet-500 mt-0.5">
+                            {strategies.length > 0 && `${strategies.length}/5 strategies complete`}
+                            {p?.best_pass_rate != null && p.best_pass_rate > 0 && ` · Best so far: ${p.best_pass_rate}%`}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Baseline card */}
+                      {p?.baseline_pass_rate != null && (
+                        <div className="flex items-center gap-3 p-3 rounded-lg border bg-slate-50 border-slate-200 text-xs">
+                          <div className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm bg-white border border-slate-200">B</div>
+                          <div className="flex-1">
+                            <span className="font-semibold text-slate-700">Baseline</span>
+                            <span className="text-slate-400 ml-2">{p.baseline_passed}/{p.baseline_total || '?'} passed</span>
+                          </div>
+                          <div className="text-sm font-bold text-slate-700">{p.baseline_pass_rate}%</div>
+                        </div>
+                      )}
+
+                      {/* Strategy cards */}
                       <div className="space-y-2">
+                        {allStrategies.map(strat => {
+                          const completed = strategies.find(s => s.strategy === strat.id)
+                          const isRunning = currentStrategy === strat.id && !completed
+                          const isWaiting = !completed && !isRunning
+
+                          return (
+                            <div key={strat.id} className={`flex items-center gap-3 p-3 rounded-lg border text-xs transition-all ${
+                              isRunning ? 'bg-violet-50 border-violet-300 ring-1 ring-violet-200' :
+                              completed?.status === 'done' && completed?.is_best ? 'bg-emerald-50 border-emerald-200' :
+                              completed?.status === 'done' ? 'bg-white border-slate-200' :
+                              completed?.status === 'error' ? 'bg-red-50/50 border-red-200' :
+                              completed?.status === 'skipped' ? 'bg-slate-50 border-slate-100 opacity-60' :
+                              'bg-slate-50 border-slate-100 opacity-50'
+                            }`}>
+                              <div className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-white border border-slate-200">
+                                {isRunning ? <Loader2 size={14} className="animate-spin text-violet-500" /> :
+                                 completed?.status === 'done' && completed?.is_best ? <Trophy size={14} className="text-amber-500" /> :
+                                 completed?.status === 'done' ? <CheckCircle size={14} className="text-emerald-500" /> :
+                                 completed?.status === 'error' ? <XCircle size={14} className="text-red-400" /> :
+                                 completed?.status === 'skipped' ? <span className="text-slate-300 text-2xs">--</span> :
+                                 <span className="text-slate-300 text-2xs">{allStrategies.indexOf(strat) + 1}</span>}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className={`font-semibold ${isRunning ? 'text-violet-700' : 'text-slate-700'}`}>{strat.label}</span>
+                                  <span className={`px-1.5 py-0.5 rounded text-2xs ${
+                                    strat.type === 'dspy' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
+                                  }`}>{strat.type === 'dspy' ? 'DSPy' : 'Custom'}</span>
+                                  {isRunning && <span className="text-violet-500 text-2xs">running...</span>}
+                                </div>
+                                {completed?.changes_summary && (
+                                  <div className="text-slate-500 truncate mt-0.5">{completed.changes_summary}</div>
+                                )}
+                              </div>
+                              <div className="text-right shrink-0">
+                                {completed?.status === 'done' && completed.pass_rate != null ? (
+                                  <div className={`text-sm font-bold ${completed.is_best ? 'text-emerald-600' : 'text-slate-700'}`}>
+                                    {completed.pass_rate}%
+                                  </div>
+                                ) : completed?.status === 'error' ? (
+                                  <span className="text-2xs text-red-400">failed</span>
+                                ) : completed?.status === 'skipped' ? (
+                                  <span className="text-2xs text-slate-400">skipped</span>
+                                ) : isWaiting ? (
+                                  <span className="text-2xs text-slate-300">waiting</span>
+                                ) : null}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* Final result */}
+                {optimizeResult && !optimizing && (
+                  <div className={`p-4 rounded-lg border ${optimizeResult.ok || optimizeResult.status === 'completed' ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+                    {optimizeResult.ok || optimizeResult.status === 'completed' ? (
+                      <div className="space-y-3">
                         <div className="flex items-center gap-2 text-sm font-semibold text-emerald-700">
-                          Optimization Complete
+                          <CheckCircle size={16} /> Optimization Complete
                         </div>
                         <div className="grid grid-cols-3 gap-3 text-center">
                           <div className="p-2 bg-white rounded-lg">
                             <div className="text-2xs text-slate-400 uppercase">Initial</div>
-                            <div className="text-lg font-bold text-slate-700">{optimizeResult.initial_pass_rate}%</div>
+                            <div className="text-lg font-bold text-slate-700">{optimizeResult.initial_pass_rate ?? optimizeResult.baseline_pass_rate}%</div>
                           </div>
                           <div className="p-2 bg-white rounded-lg">
                             <div className="text-2xs text-slate-400 uppercase">Final</div>
-                            <div className="text-lg font-bold text-emerald-600">{optimizeResult.final_pass_rate}%</div>
+                            <div className="text-lg font-bold text-emerald-600">{optimizeResult.final_pass_rate ?? optimizeResult.best_pass_rate}%</div>
                           </div>
                           <div className="p-2 bg-white rounded-lg">
                             <div className="text-2xs text-slate-400 uppercase">Uplift</div>
@@ -277,19 +425,46 @@ export default function PromptRegistryPage() {
                             </div>
                           </div>
                         </div>
-                        <div className="text-xs text-slate-500">
-                          {optimizeResult.total_iterations} iterations completed. New prompt versions saved.
-                        </div>
-                        {optimizeResult.iterations?.map((it, i) => (
-                          <div key={i} className="text-xs text-slate-600 flex items-center gap-2">
-                            <span className="font-mono text-slate-400">#{it.iteration}</span>
-                            <span>Pass rate: {it.pass_rate}%</span>
-                            {it.changes_summary && <span className="text-violet-600">— <MarkdownRenderer content={it.changes_summary} size="xs" className="inline" /></span>}
+                        {optimizeResult.best_strategy && optimizeResult.best_strategy !== 'baseline' && (
+                          <div className="flex items-center gap-2 p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-xs">
+                            <Trophy size={14} className="text-amber-500" />
+                            <span className="font-semibold text-amber-700">Winning strategy: {optimizeResult.best_strategy.replace(/_/g, ' ')}</span>
+                            {optimizeResult.new_version && (
+                              <span className="px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded text-2xs ml-auto">Saved as v{optimizeResult.new_version}</span>
+                            )}
+                          </div>
+                        )}
+                        {optimizeResult.strategies_completed?.map((s, i) => (
+                          <div key={i} className={`flex items-center gap-3 p-2.5 rounded-lg border text-xs ${
+                            s.is_best ? 'bg-emerald-50/50 border-emerald-200' :
+                            s.status === 'error' ? 'bg-red-50/30 border-red-100' :
+                            'bg-white border-slate-100'
+                          }`}>
+                            <div className="shrink-0 w-6 flex justify-center">
+                              {s.is_best ? <Trophy size={12} className="text-amber-500" /> :
+                               s.status === 'done' ? <CheckCircle size={12} className="text-emerald-400" /> :
+                               s.status === 'error' ? <XCircle size={12} className="text-red-400" /> :
+                               <span className="text-slate-300">--</span>}
+                            </div>
+                            <span className={`font-semibold ${s.is_best ? 'text-emerald-600' : 'text-slate-600'}`}>
+                              {s.label || s.strategy}
+                            </span>
+                            <span className={`px-1.5 py-0.5 rounded text-2xs ${
+                              s.type === 'dspy' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
+                            }`}>{s.type === 'dspy' ? 'DSPy' : 'Custom'}</span>
+                            {s.status === 'done' && s.pass_rate != null && (
+                              <span className={`ml-auto font-bold ${s.is_best ? 'text-emerald-600' : 'text-slate-600'}`}>{s.pass_rate}%</span>
+                            )}
+                            {s.status === 'error' && <span className="ml-auto text-red-400">error</span>}
+                            {s.status === 'skipped' && <span className="ml-auto text-slate-400">skipped</span>}
                           </div>
                         ))}
                       </div>
                     ) : (
-                      <div className="text-sm text-red-600">{optimizeResult.error || 'Optimization failed'}</div>
+                      <div className="flex items-center gap-2 text-sm text-red-600">
+                        <XCircle size={16} />
+                        {optimizeResult.error || 'Optimization failed'}
+                      </div>
                     )}
                   </div>
                 )}

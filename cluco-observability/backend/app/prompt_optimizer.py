@@ -142,6 +142,9 @@ STRATEGY_PROMPTS = {
 }
 
 
+STRATEGY_ROTATION_ORDER = ["failure_driven", "instruction_refinement", "few_shot"]
+
+
 def _call_optimizer_llm(system_prompt: str, user_message: str, model: str = None,
                         temperature: float = 0.3) -> dict:
     api_key = os.getenv("OPENAI_API_KEY", "")
@@ -151,7 +154,7 @@ def _call_optimizer_llm(system_prompt: str, user_message: str, model: str = None
     from langchain_openai import ChatOpenAI
     from langchain_core.messages import SystemMessage, HumanMessage
 
-    model = model or os.getenv("CLUCO_OPTIMIZER_MODEL", "gpt-4o-mini")
+    model = model or os.getenv("CLUCO_OPTIMIZER_MODEL", "gpt-4o")
     llm = ChatOpenAI(
         model=model,
         temperature=temperature,
@@ -301,6 +304,18 @@ def _generate_candidates(strategy: str, current_prompt: str, failures: list,
     return unique
 
 
+def _upsert_run_progress(store, run_id: str, data: dict):
+    """Write incremental progress to MongoDB so the frontend can poll status."""
+    try:
+        store._db["optimization_runs"].update_one(
+            {"_id": run_id},
+            {"$set": data},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.debug("Could not upsert optimization run progress: %s", e)
+
+
 def run_optimization(
     store,
     prompt_id: str,
@@ -310,6 +325,7 @@ def run_optimization(
     optimizer_model: str = None,
     strategy: str = "failure_driven",
     evaluator_ids: list = None,
+    run_id: str = None,
 ) -> dict:
     """
     DSPy-inspired prompt optimization loop with experiment tracking.
@@ -320,9 +336,8 @@ def run_optimization(
       3. Evaluate actual outputs with the judge
       4. Select the best candidate (metric-driven)
       5. Save as new prompt version if better than current best
-      6. Early-stop if no improvement for 2 consecutive iterations
+      6. Rotate strategy on plateau, stop after exhausting all strategies
     """
-    from app.evaluation_engine import TraceContext, run_single_evaluator
 
     prompt = store.get_prompt_template(prompt_id)
     if not prompt:
@@ -346,7 +361,12 @@ def run_optimization(
 
     eval_items = items[:50]
 
-    run_id = str(uuid.uuid4())[:12]
+    if not run_id:
+        run_id = str(uuid.uuid4())[:12]
+
+    if len(eval_items) < 5:
+        logger.warning("Dataset has only %d items — optimization results may be unreliable "
+                        "(recommend 10+ items)", len(eval_items))
 
     latest_versions = store.list_prompt_versions_for_template(prompt_id, limit=1)
     if latest_versions:
@@ -362,6 +382,19 @@ def run_optimization(
     logger.info("Starting DSPy-style optimization for prompt %s with %d items",
                 prompt_id, len(eval_items))
 
+    _upsert_run_progress(store, run_id, {
+        "status": "running",
+        "prompt_id": prompt_id,
+        "dataset_id": dataset_id,
+        "evaluator_ids": all_evaluator_ids,
+        "strategy": strategy,
+        "max_iterations": max_iterations,
+        "dataset_item_count": len(eval_items),
+        "current_iteration": 0,
+        "current_phase": "evaluating_baseline",
+        "created_at": datetime.utcnow(),
+    })
+
     # --- Baseline evaluation with the original prompt ---
     logger.info("Evaluating baseline prompt...")
     baseline = _evaluate_candidate(
@@ -376,6 +409,11 @@ def run_optimization(
     no_improvement_count = 0
     n_candidates = 3
 
+    # Track last iteration's failures/successes in standalone variables
+    # so they survive the clean_result stripping applied to `iterations`
+    last_failed_cases = baseline["failed_cases"]
+    last_passed_cases = baseline["passed_cases"]
+
     baseline_result = {
         "iteration": 0,
         "strategy": "baseline",
@@ -388,34 +426,46 @@ def run_optimization(
     }
     iterations.append(baseline_result)
 
+    _upsert_run_progress(store, run_id, {
+        "iterations": iterations,
+        "initial_pass_rate": baseline["pass_rate"],
+        "current_iteration": 0,
+        "current_phase": "baseline_complete",
+    })
+
     _create_experiment_record(
         store, run_id, 0, prompt_id, dataset_id, all_evaluator_ids,
         primary_evaluator, baseline, prompt, experiments_created
     )
 
+    # Strategy rotation: track which strategies have been tried without improvement
+    current_strategy = strategy
+    strategies_tried_without_improvement = set()
+
     for iteration in range(1, max_iterations + 1):
         logger.info("Optimization iteration %d/%d [%s] for prompt %s",
-                     iteration, max_iterations, strategy, prompt_id)
+                     iteration, max_iterations, current_strategy, prompt_id)
+
+        _upsert_run_progress(store, run_id, {
+            "current_iteration": iteration,
+            "current_phase": "generating_candidates",
+            "current_strategy": current_strategy,
+        })
 
         if best_pass_rate >= 95:
             logger.info("Target pass rate reached (%.1f%%). Stopping.", best_pass_rate)
             iterations.append({
                 "iteration": iteration,
-                "strategy": strategy,
+                "strategy": current_strategy,
                 "stopped_reason": "target_reached",
                 "pass_rate": best_pass_rate,
                 "avg_score": best_avg_score,
             })
             break
 
-        prev_failures = baseline["failed_cases"] if iteration == 1 else \
-            iterations[-1].get("_failed_cases", baseline["failed_cases"])
-        prev_successes = baseline["passed_cases"] if iteration == 1 else \
-            iterations[-1].get("_passed_cases", baseline["passed_cases"])
-
         candidates = _generate_candidates(
-            strategy, best_prompt,
-            prev_failures[:10], prev_successes[:5],
+            current_strategy, best_prompt,
+            last_failed_cases[:10], last_passed_cases[:5],
             n_candidates=n_candidates,
             optimizer_model=optimizer_model,
             target_model=target_model,
@@ -425,7 +475,7 @@ def run_optimization(
             logger.warning("No candidates generated at iteration %d", iteration)
             iterations.append({
                 "iteration": iteration,
-                "strategy": strategy,
+                "strategy": current_strategy,
                 "stopped_reason": "no_candidates_generated",
                 "pass_rate": best_pass_rate,
                 "avg_score": best_avg_score,
@@ -433,6 +483,11 @@ def run_optimization(
             break
 
         # --- Evaluate each candidate (DSPy-style metric-driven selection) ---
+        _upsert_run_progress(store, run_id, {
+            "current_phase": "evaluating_candidates",
+            "candidates_count": len(candidates),
+        })
+
         candidate_results = []
         for ci, cand in enumerate(candidates):
             logger.info("Evaluating candidate %d/%d (approach=%s, temp=%.1f)...",
@@ -455,7 +510,7 @@ def run_optimization(
 
         iteration_result = {
             "iteration": iteration,
-            "strategy": strategy,
+            "strategy": current_strategy,
             "candidates_evaluated": len(candidates),
             "pass_rate": cand_pass_rate,
             "avg_score": cand_avg_score,
@@ -466,9 +521,11 @@ def run_optimization(
             "changes_summary": best_candidate["candidate"]["changes_summary"],
             "confidence": best_candidate["candidate"]["confidence"],
             "approach": best_candidate["candidate"]["approach"],
-            "_failed_cases": best_candidate["eval"]["failed_cases"],
-            "_passed_cases": best_candidate["eval"]["passed_cases"],
         }
+
+        # Update the standalone feedback variables for the NEXT iteration
+        last_failed_cases = best_candidate["eval"]["failed_cases"]
+        last_passed_cases = best_candidate["eval"]["passed_cases"]
 
         if cand_pass_rate > best_pass_rate or (
             cand_pass_rate == best_pass_rate and cand_avg_score > best_avg_score
@@ -477,12 +534,13 @@ def run_optimization(
             best_avg_score = cand_avg_score
             best_prompt = best_candidate["candidate"]["prompt"]
             no_improvement_count = 0
+            strategies_tried_without_improvement.clear()
 
             ver_result = store.create_prompt_version(
                 prompt_id=prompt_id,
                 content=best_prompt,
                 tags=[f"optimization-{run_id}", f"iter-{iteration}",
-                      f"strategy-{strategy}", f"pass_rate-{cand_pass_rate}"],
+                      f"strategy-{current_strategy}", f"pass_rate-{cand_pass_rate}"],
             )
             version_number = ver_result.get("version_number") if ver_result else None
             iteration_result["new_version"] = version_number
@@ -493,23 +551,44 @@ def run_optimization(
         else:
             no_improvement_count += 1
             iteration_result["improvement"] = False
-            logger.info("No improvement (%.1f%% vs best %.1f%%). Streak: %d",
-                         cand_pass_rate, best_pass_rate, no_improvement_count)
+            strategies_tried_without_improvement.add(current_strategy)
+            logger.info("No improvement (%.1f%% vs best %.1f%%). Streak: %d, strategy: %s",
+                         cand_pass_rate, best_pass_rate, no_improvement_count, current_strategy)
+
+            # Rotate to next untried strategy
+            next_strategy = None
+            for s in STRATEGY_ROTATION_ORDER:
+                if s not in strategies_tried_without_improvement:
+                    next_strategy = s
+                    break
+
+            if next_strategy:
+                logger.info("Rotating strategy: %s -> %s", current_strategy, next_strategy)
+                current_strategy = next_strategy
+                iteration_result["strategy_rotated_to"] = next_strategy
+            else:
+                logger.info("All strategies exhausted without improvement. Stopping.")
+                iteration_result["stopped_reason"] = "all_strategies_exhausted"
+                iterations.append(iteration_result)
+
+                _upsert_run_progress(store, run_id, {
+                    "iterations": iterations,
+                    "current_phase": "completed",
+                })
+                break
 
         _create_experiment_record(
             store, run_id, iteration, prompt_id, dataset_id, all_evaluator_ids,
             primary_evaluator, best_candidate["eval"], prompt, experiments_created
         )
 
-        clean_result = {k: v for k, v in iteration_result.items()
-                        if not k.startswith("_")}
-        iterations.append(clean_result)
+        iterations.append(iteration_result)
 
-        if no_improvement_count >= 2:
-            logger.info("No improvement for %d consecutive iterations. Stopping.",
-                         no_improvement_count)
-            clean_result["stopped_reason"] = "no_improvement_plateau"
-            break
+        _upsert_run_progress(store, run_id, {
+            "iterations": iterations,
+            "current_phase": "iteration_complete",
+            "best_pass_rate": best_pass_rate,
+        })
 
     initial_pass_rate = iterations[0]["pass_rate"] if iterations else 0
     final_pass_rate = best_pass_rate
@@ -529,16 +608,13 @@ def run_optimization(
         "uplift": uplift,
         "total_iterations": len(iterations),
         "completed_at": datetime.utcnow().isoformat(),
+        "status": "completed",
     }
 
-    try:
-        store._db["optimization_runs"].insert_one({
-            **report,
-            "_id": run_id,
-            "created_at": datetime.utcnow(),
-        })
-    except Exception:
-        pass
+    _upsert_run_progress(store, run_id, {
+        **report,
+        "current_phase": "completed",
+    })
 
     return report
 
@@ -628,3 +704,297 @@ def _build_strategy_message(strategy: str, current_prompt: str,
 
 def _build_optimizer_message(current_prompt: str, failures: list, successes: list) -> str:
     return _build_strategy_message("failure_driven", current_prompt, failures, successes)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-Best Orchestrator: runs ALL strategies and picks the winner
+# ─────────────────────────────────────────────────────────────────────────────
+
+ALL_STRATEGY_ORDER = [
+    ("failure_driven", "Failure-Driven", "custom"),
+    ("instruction_refinement", "Instruction Refinement", "custom"),
+    ("few_shot", "Few-Shot", "custom"),
+    ("dspy_bootstrap", "DSPy Bootstrap", "dspy"),
+    ("dspy_mipro", "DSPy MIPROv2", "dspy"),
+]
+
+
+def run_all_strategies_optimization(
+    store,
+    prompt_id: str,
+    dataset_id: str,
+    evaluator_id: str,
+    max_iterations: int = 4,
+    optimizer_model: str = None,
+    evaluator_ids: list = None,
+    run_id: str = None,
+) -> dict:
+    """
+    Run ALL optimization strategies (custom + DSPy) sequentially,
+    pick the best result, and save the winning prompt as a new version.
+    Progress is upserted after every step for frontend polling.
+    """
+    prompt = store.get_prompt_template(prompt_id)
+    if not prompt:
+        return {"ok": False, "error": "Prompt not found"}
+
+    dataset = store.get_dataset(dataset_id)
+    if not dataset:
+        return {"ok": False, "error": "Dataset not found"}
+
+    all_evaluator_ids = evaluator_ids or ([evaluator_id] if evaluator_id else [])
+    evaluator_objs = [store.get_evaluator(eid) for eid in all_evaluator_ids]
+    evaluator_objs = [e for e in evaluator_objs if e]
+    if not evaluator_objs:
+        return {"ok": False, "error": "No valid evaluators found"}
+
+    primary_evaluator = evaluator_objs[0]
+
+    items = store.get_dataset_items(dataset_id)
+    if not items:
+        return {"ok": False, "error": "Dataset has no items"}
+
+    eval_items = items[:50]
+
+    if not run_id:
+        run_id = str(uuid.uuid4())[:12]
+
+    if len(eval_items) < 5:
+        logger.warning("Dataset has only %d items — results may be unreliable", len(eval_items))
+
+    latest_versions = store.list_prompt_versions_for_template(prompt_id, limit=1)
+    current_prompt_text = latest_versions[0].get("content", "") if latest_versions else ""
+    if not current_prompt_text:
+        return {"ok": False, "error": "Prompt has no version content"}
+
+    target_model = os.getenv("CLUCO_OPTIMIZER_TARGET_MODEL", "gpt-4o-mini")
+    opt_model = optimizer_model or os.getenv("CLUCO_OPTIMIZER_MODEL", "gpt-4o")
+
+    _upsert_run_progress(store, run_id, {
+        "status": "running",
+        "prompt_id": prompt_id,
+        "dataset_id": dataset_id,
+        "evaluator_ids": all_evaluator_ids,
+        "max_iterations": max_iterations,
+        "dataset_item_count": len(eval_items),
+        "current_phase": "baseline",
+        "current_strategy": None,
+        "strategies_completed": [],
+        "created_at": datetime.utcnow(),
+    })
+
+    # --- Baseline ---
+    logger.info("Auto-best: evaluating baseline for prompt %s with %d items", prompt_id, len(eval_items))
+    baseline = _evaluate_candidate(current_prompt_text, eval_items, primary_evaluator, store, target_model)
+    baseline_pass_rate = baseline["pass_rate"]
+
+    _upsert_run_progress(store, run_id, {
+        "current_phase": "baseline_complete",
+        "baseline_pass_rate": baseline_pass_rate,
+        "baseline_avg_score": baseline["avg_score"],
+        "baseline_total": baseline["total"],
+        "baseline_passed": baseline["passed"],
+        "baseline_failed": baseline["failed"],
+    })
+
+    strategies_completed = []
+    best_overall_rate = baseline_pass_rate
+    best_overall_prompt = current_prompt_text
+    best_overall_strategy = "baseline"
+    best_overall_summary = "Original prompt"
+    experiments_created = []
+
+    iters_per_custom = max(1, min(max_iterations, 2))
+
+    for strategy_id, strategy_label, strategy_type in ALL_STRATEGY_ORDER:
+        logger.info("Auto-best: running strategy '%s' (%s)", strategy_id, strategy_type)
+
+        _upsert_run_progress(store, run_id, {
+            "current_phase": "strategy_running",
+            "current_strategy": strategy_id,
+            "strategies_completed": strategies_completed,
+        })
+
+        entry = {
+            "strategy": strategy_id,
+            "label": strategy_label,
+            "type": strategy_type,
+            "status": "running",
+            "pass_rate": None,
+            "changes_summary": "",
+        }
+
+        try:
+            if strategy_type == "custom":
+                result = _run_single_custom_strategy(
+                    store=store,
+                    strategy=strategy_id,
+                    prompt_text=best_overall_prompt,
+                    eval_items=eval_items,
+                    primary_evaluator=primary_evaluator,
+                    target_model=target_model,
+                    optimizer_model=opt_model,
+                    max_iterations=iters_per_custom,
+                    baseline_failed=baseline["failed_cases"],
+                    baseline_passed=baseline["passed_cases"],
+                )
+            else:
+                from app.dspy_optimizer import run_dspy_strategy
+
+                def dspy_progress(phase):
+                    _upsert_run_progress(store, run_id, {
+                        "dspy_phase": phase,
+                    })
+
+                result = run_dspy_strategy(
+                    strategy=strategy_id,
+                    prompt_text=best_overall_prompt,
+                    eval_items=eval_items,
+                    evaluator_obj=primary_evaluator,
+                    target_model=target_model,
+                    optimizer_model=opt_model,
+                    progress_callback=dspy_progress,
+                )
+
+            entry["status"] = result.get("status", "done")
+            entry["pass_rate"] = result.get("pass_rate", 0)
+            entry["changes_summary"] = result.get("changes_summary", "")
+            entry["passed"] = result.get("passed")
+            entry["failed"] = result.get("failed")
+            entry["total"] = result.get("total")
+
+            if entry["status"] == "done" and entry["pass_rate"] > best_overall_rate:
+                best_overall_rate = entry["pass_rate"]
+                best_overall_prompt = result.get("prompt_text", best_overall_prompt)
+                best_overall_strategy = strategy_id
+                best_overall_summary = result.get("changes_summary", "")
+                entry["is_best"] = True
+                logger.info("Auto-best: new leader '%s' with %.1f%%", strategy_id, entry["pass_rate"])
+
+        except Exception as e:
+            logger.error("Auto-best: strategy '%s' failed: %s", strategy_id, e)
+            entry["status"] = "error"
+            entry["changes_summary"] = str(e)
+
+        strategies_completed.append(entry)
+
+        _upsert_run_progress(store, run_id, {
+            "strategies_completed": strategies_completed,
+            "best_strategy": best_overall_strategy,
+            "best_pass_rate": best_overall_rate,
+        })
+
+    # --- Save the winning prompt as a new version ---
+    version_number = None
+    if best_overall_strategy != "baseline" and best_overall_rate > baseline_pass_rate:
+        ver_result = store.create_prompt_version(
+            prompt_id=prompt_id,
+            content=best_overall_prompt,
+            tags=[
+                f"auto-optimize-{run_id}",
+                f"strategy-{best_overall_strategy}",
+                f"pass_rate-{best_overall_rate}",
+            ],
+        )
+        version_number = ver_result.get("version_number") if ver_result else None
+        logger.info("Auto-best: saved winning prompt as v%s (strategy=%s, rate=%.1f%%)",
+                     version_number, best_overall_strategy, best_overall_rate)
+
+    # Create experiment record for winning strategy
+    if best_overall_strategy != "baseline":
+        final_eval = _evaluate_candidate(best_overall_prompt, eval_items, primary_evaluator, store, target_model)
+        _create_experiment_record(
+            store, run_id, 1, prompt_id, dataset_id, all_evaluator_ids,
+            primary_evaluator, final_eval, prompt, experiments_created,
+        )
+
+    uplift = round(best_overall_rate - baseline_pass_rate, 1)
+
+    report = {
+        "ok": True,
+        "run_id": run_id,
+        "prompt_id": prompt_id,
+        "dataset_id": dataset_id,
+        "evaluator_ids": all_evaluator_ids,
+        "strategies_completed": strategies_completed,
+        "baseline_pass_rate": baseline_pass_rate,
+        "best_strategy": best_overall_strategy,
+        "best_pass_rate": best_overall_rate,
+        "initial_pass_rate": baseline_pass_rate,
+        "final_pass_rate": best_overall_rate,
+        "uplift": uplift,
+        "new_version": version_number,
+        "experiments": experiments_created,
+        "completed_at": datetime.utcnow().isoformat(),
+        "status": "completed",
+    }
+
+    _upsert_run_progress(store, run_id, {
+        **report,
+        "current_phase": "completed",
+        "current_strategy": None,
+    })
+
+    return report
+
+
+def _run_single_custom_strategy(
+    store,
+    strategy: str,
+    prompt_text: str,
+    eval_items: list,
+    primary_evaluator: dict,
+    target_model: str,
+    optimizer_model: str,
+    max_iterations: int,
+    baseline_failed: list,
+    baseline_passed: list,
+) -> dict:
+    """Run a single custom strategy for a fixed number of iterations.
+    Returns dict with pass_rate, prompt_text, changes_summary, status."""
+
+    best_prompt = prompt_text
+    best_rate = 0
+    best_summary = ""
+    last_failed = baseline_failed
+    last_passed = baseline_passed
+    n_candidates = 3
+
+    for iteration in range(1, max_iterations + 1):
+        candidates = _generate_candidates(
+            strategy, best_prompt,
+            last_failed[:10], last_passed[:5],
+            n_candidates=n_candidates,
+            optimizer_model=optimizer_model,
+            target_model=target_model,
+        )
+        if not candidates:
+            break
+
+        candidate_results = []
+        for cand in candidates:
+            eval_result = _evaluate_candidate(
+                cand["prompt"], eval_items, primary_evaluator, store, target_model
+            )
+            candidate_results.append({"candidate": cand, "eval": eval_result})
+
+        winner = max(candidate_results, key=lambda x: (x["eval"]["pass_rate"], x["eval"]["avg_score"]))
+        rate = winner["eval"]["pass_rate"]
+
+        last_failed = winner["eval"]["failed_cases"]
+        last_passed = winner["eval"]["passed_cases"]
+
+        if rate > best_rate:
+            best_rate = rate
+            best_prompt = winner["candidate"]["prompt"]
+            best_summary = winner["candidate"]["changes_summary"]
+
+    return {
+        "status": "done",
+        "pass_rate": best_rate,
+        "prompt_text": best_prompt,
+        "changes_summary": best_summary,
+        "passed": len(last_passed) if last_passed else 0,
+        "failed": len(last_failed) if last_failed else 0,
+        "total": (len(last_passed) + len(last_failed)) if last_passed is not None else 0,
+    }
