@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getPromptTemplates, getPromptTemplate, getPromptTemplateVersions, getPromptVersionDetail, createPromptTemplate, createPromptVersion, comparePromptVersions, optimizePrompt, getOptimizationRun, getDatasets, getEvaluators, getPromptVersions, getProducts, getPipelines } from '../api'
-import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash, AlertTriangle, CheckCircle, XCircle, Trophy } from 'lucide-react'
+import { getPromptTemplates, getPromptTemplate, getPromptTemplateVersions, getPromptVersionDetail, createPromptTemplate, createPromptVersion, comparePromptVersions, optimizePrompt, getOptimizationRun, getDatasets, getEvaluators, getPromptVersions, getProducts, getPipelines, testPromptOnDataset } from '../api'
+import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash, AlertTriangle, CheckCircle, XCircle, Trophy, Play, ChevronDown, ChevronUp, Eye } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import FilterBar, { FilterSelect } from '../components/ui/FilterBar'
 import MarkdownRenderer from '../components/MarkdownRenderer'
@@ -41,6 +41,13 @@ export default function PromptRegistryPage() {
   const [expandedSdkRow, setExpandedSdkRow] = useState(null)
   const [products, setProducts] = useState([])
   const [selectedProduct, setSelectedProduct] = useState('')
+  const [expandedStrategy, setExpandedStrategy] = useState(null)
+  const [showTestPanel, setShowTestPanel] = useState(false)
+  const [testDatasetId, setTestDatasetId] = useState('')
+  const [testEvaluatorId, setTestEvaluatorId] = useState('')
+  const [testVersionNum, setTestVersionNum] = useState(null)
+  const [testRunning, setTestRunning] = useState(false)
+  const [testResult, setTestResult] = useState(null)
 
   useEffect(() => {
     Promise.all([
@@ -153,6 +160,23 @@ export default function PromptRegistryPage() {
     setCompareData(null)
   }
 
+  const handleTestOnDataset = async () => {
+    if (!testDatasetId || !testEvaluatorId || !selectedPrompt) return
+    setTestRunning(true)
+    setTestResult(null)
+    try {
+      const res = await testPromptOnDataset(selectedPrompt.prompt_id, {
+        dataset_id: testDatasetId,
+        evaluator_id: testEvaluatorId,
+        version_number: testVersionNum || selectedVersion,
+      })
+      setTestResult(res.data)
+    } catch (e) {
+      setTestResult({ ok: false, error: e.response?.data?.detail || e.message || 'Test failed' })
+    }
+    setTestRunning(false)
+  }
+
   const openOptimizeWizard = async () => {
     setShowOptimize(true)
     setOptimizeResult(null)
@@ -230,6 +254,18 @@ export default function PromptRegistryPage() {
           <button onClick={() => { setCompareMode(!compareMode); setCompareData(null) }}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${compareMode ? 'bg-brand-50 border-brand-200 text-brand-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
             <GitCompare size={14} /> {compareMode ? 'List' : 'Compare'}
+          </button>
+          <button onClick={() => {
+              setShowTestPanel(!showTestPanel); setTestResult(null)
+              if (!showTestPanel) {
+                Promise.all([getDatasets(), getEvaluators()]).then(([dsRes, evRes]) => {
+                  setAvailableDatasets(dsRes.data?.datasets || [])
+                  setAvailableEvaluators((evRes.data?.evaluators || []).filter(e => e.type === 'llm_judge' || e.type === 'conversation_judge'))
+                }).catch(() => {})
+              }
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${showTestPanel ? 'bg-blue-50 border-blue-200 text-blue-600' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
+            <Play size={14} /> Test on Dataset
           </button>
           <button onClick={openOptimizeWizard}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-50 text-violet-600 hover:bg-violet-100 border border-violet-200">
@@ -434,29 +470,112 @@ export default function PromptRegistryPage() {
                             )}
                           </div>
                         )}
-                        {optimizeResult.strategies_completed?.map((s, i) => (
-                          <div key={i} className={`flex items-center gap-3 p-2.5 rounded-lg border text-xs ${
-                            s.is_best ? 'bg-emerald-50/50 border-emerald-200' :
-                            s.status === 'error' ? 'bg-red-50/30 border-red-100' :
-                            'bg-white border-slate-100'
-                          }`}>
-                            <div className="shrink-0 w-6 flex justify-center">
-                              {s.is_best ? <Trophy size={12} className="text-amber-500" /> :
-                               s.status === 'done' ? <CheckCircle size={12} className="text-emerald-400" /> :
-                               s.status === 'error' ? <XCircle size={12} className="text-red-400" /> :
-                               <span className="text-slate-300">--</span>}
-                            </div>
-                            <span className={`font-semibold ${s.is_best ? 'text-emerald-600' : 'text-slate-600'}`}>
-                              {s.label || s.strategy}
-                            </span>
-                            <span className={`px-1.5 py-0.5 rounded text-2xs ${
-                              s.type === 'dspy' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
-                            }`}>{s.type === 'dspy' ? 'DSPy' : 'Custom'}</span>
-                            {s.status === 'done' && s.pass_rate != null && (
-                              <span className={`ml-auto font-bold ${s.is_best ? 'text-emerald-600' : 'text-slate-600'}`}>{s.pass_rate}%</span>
+
+                        {/* Baseline item details */}
+                        {optimizeResult.baseline_items?.length > 0 && (
+                          <div className="border rounded-lg overflow-hidden">
+                            <button onClick={() => setExpandedStrategy(expandedStrategy === 'baseline' ? null : 'baseline')}
+                              className="w-full flex items-center gap-2 p-2.5 bg-slate-50 hover:bg-slate-100 text-xs text-left">
+                              <Eye size={12} className="text-slate-400" />
+                              <span className="font-semibold text-slate-600">Baseline Evaluation Details</span>
+                              <span className="text-slate-400 ml-1">{optimizeResult.baseline_items.length} items</span>
+                              <span className="ml-auto">{expandedStrategy === 'baseline' ? <ChevronUp size={12} /> : <ChevronDown size={12} />}</span>
+                            </button>
+                            {expandedStrategy === 'baseline' && (
+                              <div className="max-h-60 overflow-auto">
+                                <table className="w-full text-2xs">
+                                  <thead><tr className="bg-slate-50 border-b">
+                                    <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Input</th>
+                                    <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Expected</th>
+                                    <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Actual</th>
+                                    <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Score</th>
+                                    <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Reasoning</th>
+                                  </tr></thead>
+                                  <tbody>
+                                    {optimizeResult.baseline_items.map((item, idx) => (
+                                      <tr key={idx} className={`border-b ${item.passed ? '' : 'bg-red-50/50'}`}>
+                                        <td className="px-2 py-1.5 max-w-[120px] truncate" title={item.input}>{item.input}</td>
+                                        <td className="px-2 py-1.5 max-w-[100px] truncate text-emerald-700 font-medium" title={item.expected}>{item.expected}</td>
+                                        <td className={`px-2 py-1.5 max-w-[100px] truncate font-medium ${item.passed ? 'text-emerald-600' : 'text-red-600'}`} title={item.actual}>{item.actual}</td>
+                                        <td className="px-2 py-1.5">{item.passed ? <CheckCircle size={10} className="text-emerald-500" /> : <XCircle size={10} className="text-red-400" />} {item.score}</td>
+                                        <td className="px-2 py-1.5 max-w-[150px] truncate text-slate-500" title={item.reasoning}>{item.reasoning}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             )}
-                            {s.status === 'error' && <span className="ml-auto text-red-400">error</span>}
-                            {s.status === 'skipped' && <span className="ml-auto text-slate-400">skipped</span>}
+                          </div>
+                        )}
+
+                        {/* Strategy results with expandable item details */}
+                        {optimizeResult.strategies_completed?.map((s, i) => (
+                          <div key={i} className={`rounded-lg border overflow-hidden ${
+                            s.is_best ? 'border-emerald-200' :
+                            s.status === 'error' ? 'border-red-100' :
+                            'border-slate-100'
+                          }`}>
+                            <button onClick={() => setExpandedStrategy(expandedStrategy === s.strategy ? null : s.strategy)}
+                              className={`w-full flex items-center gap-3 p-2.5 text-xs text-left hover:bg-slate-50 ${
+                                s.is_best ? 'bg-emerald-50/50' : s.status === 'error' ? 'bg-red-50/30' : 'bg-white'
+                              }`}>
+                              <div className="shrink-0 w-6 flex justify-center">
+                                {s.is_best ? <Trophy size={12} className="text-amber-500" /> :
+                                 s.status === 'done' ? <CheckCircle size={12} className="text-emerald-400" /> :
+                                 s.status === 'error' ? <XCircle size={12} className="text-red-400" /> :
+                                 <span className="text-slate-300">--</span>}
+                              </div>
+                              <span className={`font-semibold ${s.is_best ? 'text-emerald-600' : 'text-slate-600'}`}>
+                                {s.label || s.strategy}
+                              </span>
+                              <span className={`px-1.5 py-0.5 rounded text-2xs ${
+                                s.type === 'dspy' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
+                              }`}>{s.type === 'dspy' ? 'DSPy' : 'Custom'}</span>
+                              {s.changes_summary && (
+                                <span className="text-slate-400 truncate max-w-[150px]">{s.changes_summary}</span>
+                              )}
+                              {s.status === 'done' && s.pass_rate != null && (
+                                <span className={`ml-auto font-bold ${s.is_best ? 'text-emerald-600' : 'text-slate-600'}`}>{s.pass_rate}%</span>
+                              )}
+                              {s.status === 'error' && <span className="ml-auto text-red-400">error</span>}
+                              {s.status === 'skipped' && <span className="ml-auto text-slate-400">skipped</span>}
+                              <span className="ml-1">{expandedStrategy === s.strategy ? <ChevronUp size={12} /> : <ChevronDown size={12} />}</span>
+                            </button>
+                            {expandedStrategy === s.strategy && (
+                              <div className="border-t border-slate-100">
+                                {s.changes_summary && (
+                                  <div className="px-3 py-2 bg-slate-50 text-2xs text-slate-600">
+                                    <span className="font-semibold">Changes:</span> {s.changes_summary}
+                                  </div>
+                                )}
+                                {s.item_results?.length > 0 ? (
+                                  <div className="max-h-60 overflow-auto">
+                                    <table className="w-full text-2xs">
+                                      <thead><tr className="bg-slate-50 border-b">
+                                        <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Input</th>
+                                        <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Expected</th>
+                                        <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Actual</th>
+                                        <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Score</th>
+                                        <th className="text-left px-2 py-1.5 font-semibold text-slate-500">Reasoning</th>
+                                      </tr></thead>
+                                      <tbody>
+                                        {s.item_results.map((item, idx) => (
+                                          <tr key={idx} className={`border-b ${item.passed ? '' : 'bg-red-50/50'}`}>
+                                            <td className="px-2 py-1.5 max-w-[120px] truncate" title={item.input}>{item.input}</td>
+                                            <td className="px-2 py-1.5 max-w-[100px] truncate text-emerald-700 font-medium" title={item.expected}>{item.expected}</td>
+                                            <td className={`px-2 py-1.5 max-w-[100px] truncate font-medium ${item.passed ? 'text-emerald-600' : 'text-red-600'}`} title={item.actual}>{item.actual}</td>
+                                            <td className="px-2 py-1.5">{item.passed ? <CheckCircle size={10} className="text-emerald-500" /> : <XCircle size={10} className="text-red-400" />} {item.score}</td>
+                                            <td className="px-2 py-1.5 max-w-[150px] truncate text-slate-500" title={item.reasoning}>{item.reasoning}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                ) : (
+                                  <div className="px-3 py-2 text-2xs text-slate-400">No per-item details available</div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -478,6 +597,79 @@ export default function PromptRegistryPage() {
                 </button>
               </div>
             </div>
+          </div>
+        )}
+
+        {showTestPanel && (
+          <div className="card p-5 mb-5 border-blue-200 bg-blue-50/30">
+            <div className="flex items-center gap-2 mb-3">
+              <Play size={16} className="text-blue-500" />
+              <span className="text-sm font-semibold text-slate-700">Test Prompt v{selectedVersion || '?'} on Dataset</span>
+              <button onClick={() => { setShowTestPanel(false); setTestResult(null) }} className="ml-auto text-xs text-slate-400 hover:text-slate-600">Close</button>
+            </div>
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <select value={testDatasetId} onChange={e => setTestDatasetId(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                <option value="">Select dataset...</option>
+                {availableDatasets.map(d => <option key={d.dataset_id} value={d.dataset_id}>{d.name} ({d.item_count || 0})</option>)}
+              </select>
+              <select value={testEvaluatorId} onChange={e => setTestEvaluatorId(e.target.value)}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm">
+                <option value="">Select judge...</option>
+                {availableEvaluators.map(e => <option key={e.evaluator_id} value={e.evaluator_id}>{e.name}</option>)}
+              </select>
+              <button onClick={handleTestOnDataset} disabled={testRunning || !testDatasetId || !testEvaluatorId}
+                className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
+                {testRunning ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                {testRunning ? 'Running...' : 'Run Test'}
+              </button>
+            </div>
+            {testResult && (
+              <div className={`rounded-lg border p-3 ${testResult.ok ? 'bg-white border-slate-200' : 'bg-red-50 border-red-200'}`}>
+                {testResult.ok ? (
+                  <>
+                    <div className="flex items-center gap-4 mb-3 text-sm">
+                      <span className="font-semibold text-slate-700">Pass Rate: <span className={testResult.pass_rate >= 50 ? 'text-emerald-600' : 'text-red-600'}>{testResult.pass_rate}%</span></span>
+                      <span className="text-slate-500">{testResult.passed}/{testResult.total} passed</span>
+                      <span className="text-slate-500">Avg Score: {testResult.avg_score}</span>
+                    </div>
+                    {testResult.items?.length > 0 && (
+                      <div className="max-h-72 overflow-auto rounded-lg border border-slate-200">
+                        <table className="w-full text-xs">
+                          <thead><tr className="bg-slate-50 border-b sticky top-0">
+                            <th className="text-left px-3 py-2 font-semibold text-slate-600">Input</th>
+                            <th className="text-left px-3 py-2 font-semibold text-slate-600">Expected</th>
+                            <th className="text-left px-3 py-2 font-semibold text-slate-600">Actual Output</th>
+                            <th className="text-left px-3 py-2 font-semibold text-slate-600 w-14">Score</th>
+                            <th className="text-left px-3 py-2 font-semibold text-slate-600">Judge Reasoning</th>
+                          </tr></thead>
+                          <tbody>
+                            {testResult.items.map((item, idx) => (
+                              <tr key={idx} className={`border-b ${item.passed ? 'hover:bg-emerald-50/30' : 'bg-red-50/30 hover:bg-red-50/50'}`}>
+                                <td className="px-3 py-2 max-w-[150px]"><div className="truncate" title={item.input}>{item.input}</div></td>
+                                <td className="px-3 py-2 max-w-[120px] font-medium text-emerald-700"><div className="truncate" title={item.expected}>{item.expected}</div></td>
+                                <td className={`px-3 py-2 max-w-[120px] font-medium ${item.passed ? 'text-emerald-600' : 'text-red-600'}`}><div className="truncate" title={item.actual}>{item.actual}</div></td>
+                                <td className="px-3 py-2">
+                                  <div className="flex items-center gap-1">
+                                    {item.passed ? <CheckCircle size={12} className="text-emerald-500" /> : <XCircle size={12} className="text-red-400" />}
+                                    <span>{item.score}</span>
+                                  </div>
+                                </td>
+                                <td className="px-3 py-2 max-w-[200px] text-slate-500"><div className="truncate" title={item.reasoning}>{item.reasoning}</div></td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="flex items-center gap-2 text-sm text-red-600">
+                    <XCircle size={14} /> {testResult.error || 'Test failed'}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

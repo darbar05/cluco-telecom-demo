@@ -3233,6 +3233,75 @@ def get_optimization_run(run_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Optimization run not found")
 
 
+@router.post("/prompts/{prompt_id}/test-on-dataset")
+def test_prompt_on_dataset(prompt_id: str, body: dict = Body(...)) -> dict:
+    """Run a specific prompt version on a dataset and return per-item results.
+    Used for manual verification of optimized prompts."""
+    from app.storage import get_trace_store
+    from app.prompt_optimizer import _evaluate_candidate
+    store = get_trace_store()
+
+    dataset_id = body.get("dataset_id")
+    evaluator_id = body.get("evaluator_id")
+    version_number = body.get("version_number")
+    prompt_text = body.get("prompt_text")
+
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="dataset_id required")
+    if not evaluator_id:
+        raise HTTPException(status_code=400, detail="evaluator_id required")
+
+    if not prompt_text:
+        if version_number:
+            ver = store.get_prompt_version(prompt_id, version_number)
+            if not ver:
+                raise HTTPException(status_code=404, detail="Version not found")
+            prompt_text = ver.get("content", "")
+        else:
+            versions = store.list_prompt_versions_for_template(prompt_id, limit=1)
+            if not versions:
+                raise HTTPException(status_code=404, detail="No versions found")
+            prompt_text = versions[0].get("content", "")
+
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail="No prompt text available")
+
+    evaluator_obj = store.get_evaluator(evaluator_id)
+    if not evaluator_obj:
+        raise HTTPException(status_code=404, detail="Evaluator not found")
+
+    items = store.get_dataset_items(dataset_id)
+    if not items:
+        raise HTTPException(status_code=404, detail="Dataset has no items")
+
+    eval_items = items[:50]
+    import os
+    target_model = os.getenv("CLUCO_OPTIMIZER_TARGET_MODEL", "gpt-4o-mini")
+
+    result = _evaluate_candidate(prompt_text, eval_items, evaluator_obj, store, target_model)
+
+    item_results = []
+    for c in result["passed_cases"] + result["failed_cases"]:
+        item_results.append({
+            "input": c.get("input", ""),
+            "expected": c.get("expected_output", ""),
+            "actual": c.get("actual_output", ""),
+            "score": c.get("score", 0),
+            "passed": c.get("passed", False),
+            "reasoning": c.get("reasoning", ""),
+        })
+
+    return {
+        "ok": True,
+        "pass_rate": result["pass_rate"],
+        "avg_score": result["avg_score"],
+        "total": result["total"],
+        "passed": result["passed"],
+        "failed": result["failed"],
+        "items": item_results,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SME Trace Review
 # Share a trace with a Subject Matter Expert via a time-limited review link.

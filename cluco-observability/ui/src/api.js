@@ -211,6 +211,7 @@ export const getPromptVersionDetail = (id, version) => api.get(`/prompts/${id}/v
 export const comparePromptVersions = (id, versionA, versionB) => api.get(`/prompts/${id}/compare`, { params: { version_a: versionA, version_b: versionB } })
 export const optimizePrompt = (promptId, data) => api.post(`/prompts/${promptId}/optimize`, data, { timeout: 300000 })
 export const getOptimizationRun = (runId) => api.get(`/prompts/optimization-runs/${runId}`)
+export const testPromptOnDataset = (promptId, data) => api.post(`/prompts/${promptId}/test-on-dataset`, data, { timeout: 300000 })
 export const runEvaluatorOnAllTraces = (evaluatorId, data) => api.post(`/evaluators/${evaluatorId}/run-on-all-traces`, data)
 
 export const sendAgentReport = (serviceName, data) => api.post(`/agents/${encodeURIComponent(serviceName)}/send-report`, data)

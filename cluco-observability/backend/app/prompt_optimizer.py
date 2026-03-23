@@ -27,56 +27,78 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-OPTIMIZER_SYSTEM_PROMPT = """You are an expert prompt engineer. Your job is to improve prompts for AI agents based on evaluation failures.
+OPTIMIZER_SYSTEM_PROMPT = """You are an expert prompt engineer specializing in failure-driven prompt optimization.
 
-You will be given:
-1. The current prompt template
-2. A list of test cases where the agent failed (with inputs, ACTUAL agent outputs, and judge reasoning)
-3. A list of test cases where the agent succeeded
+You will receive:
+1. The current prompt (system instructions for an AI agent)
+2. FAILED test cases: each has Input, Actual Output (what the agent produced), Expected Output (the correct answer), and Judge Reasoning (why it failed)
+3. PASSED test cases: input/output pairs where the agent succeeded
 
-Analyze the failure patterns carefully. The "Output" field shows what the agent ACTUALLY produced with the current prompt. The "Expected" field shows what the correct output should be. The judge reasoning explains why the output was scored poorly.
+Your optimization process:
+1. FIRST, identify the EXACT mismatch between actual and expected outputs in each failure. Be precise: is the agent producing the wrong category? Wrong format? Hallucinating content? Ignoring constraints?
+2. SECOND, look for PATTERNS across failures. Group failures by root cause (e.g., "3 of 4 failures involve billing queries being misclassified as general inquiries").
+3. THIRD, write an improved prompt that:
+   - Adds explicit rules/constraints that prevent each identified failure pattern
+   - Uses unambiguous language (avoid "may", "could", "generally")
+   - Lists exact categories/options when the task involves classification
+   - Includes decision boundaries (e.g., "If the query mentions pricing, fees, or charges -> billing")
+   - Preserves ALL behaviors that currently succeed
 
-Propose an improved version of the prompt that addresses the identified failure patterns while preserving the successful behaviors.
-
-Return ONLY valid JSON with these fields:
-{
-  "improved_prompt": "<the full improved prompt text>",
-  "changes_summary": "<brief description of what changed and why>",
-  "confidence": <0-100 number indicating your confidence this will improve results>
-}"""
-
-FEW_SHOT_SYSTEM_PROMPT = """You are an expert prompt engineer. Your job is to enhance a prompt by selecting the best few-shot examples from successful test cases.
-
-You will be given:
-1. The current prompt template
-2. A list of successful test cases (input/output pairs)
-3. A list of failed test cases
-
-Select 3-5 of the best examples that demonstrate ideal behavior and create an enhanced prompt with those examples embedded.
+CRITICAL: The improved prompt must produce DIFFERENT outputs from the current prompt on the failed cases. If the failures are about classification, add explicit category definitions with examples.
 
 Return ONLY valid JSON:
 {
-  "improved_prompt": "<the full prompt with few-shot examples included>",
-  "changes_summary": "<which examples were selected and why>",
+  "improved_prompt": "<the COMPLETE improved prompt text — include everything, not just changes>",
+  "changes_summary": "<describe each failure pattern found and the specific fix applied>",
+  "confidence": <0-100>
+}"""
+
+FEW_SHOT_SYSTEM_PROMPT = """You are an expert prompt engineer. Your job is to enhance a prompt by embedding the most effective few-shot examples.
+
+You will receive:
+1. The current prompt
+2. Successful test cases (input -> correct output) 
+3. Failed test cases (input -> wrong output vs expected)
+
+Your process:
+1. From the successes, select 3-5 examples that cover DIFFERENT types of inputs and demonstrate the full range of correct behaviors.
+2. From the failures, identify what types of inputs are missing from examples — add synthetic examples for those edge cases using the expected outputs.
+3. Embed the examples directly in the prompt using a clear format like:
+   "Examples:
+   Input: <example input>
+   Output: <correct output>"
+4. Place examples BEFORE the main instruction for maximum effectiveness.
+5. If the task involves classification, include at least one example for each category.
+
+Return ONLY valid JSON:
+{
+  "improved_prompt": "<the COMPLETE prompt with few-shot examples embedded>",
+  "changes_summary": "<which examples were selected, which edge cases were covered>",
   "confidence": <0-100>
 }"""
 
 INSTRUCTION_REFINEMENT_PROMPT = """You are an expert prompt engineer specializing in precise instruction writing.
 
-You will be given:
-1. The current prompt template  
-2. Evaluation feedback showing which instructions were followed/ignored
-3. Failed test cases with judge reasoning
+You will receive:
+1. The current prompt
+2. Failed test cases with judge reasoning showing WHERE instructions broke down
+3. Successful test cases showing what works
 
-Refine the instructions to be clearer, more specific, and better structured. Focus on:
-- Making ambiguous instructions explicit
-- Adding constraints that prevent observed failures
-- Improving the logical flow of instructions
+Your refinement process:
+1. Map each failure to the specific instruction (or missing instruction) that caused it.
+2. For each problematic instruction:
+   - Replace vague terms with specific ones (e.g., "handle appropriately" -> "respond with the exact category name from the list below")
+   - Add explicit output format requirements (e.g., "Respond with ONLY the category name, nothing else")
+   - Add boundary conditions and edge cases as explicit rules
+3. Restructure the prompt for clarity:
+   - Put the most important constraint FIRST
+   - Use numbered rules for classification/routing
+   - Add a "DO NOT" section for common mistakes observed in failures
 
 Return ONLY valid JSON:
 {
-  "improved_prompt": "<the refined prompt>",
-  "changes_summary": "<which instructions were refined and why>",
+  "improved_prompt": "<the COMPLETE refined prompt>",
+  "changes_summary": "<which instructions were ambiguous, what was refined>",
   "confidence": <0-100>
 }"""
 
@@ -87,7 +109,7 @@ You will be given:
 2. Test cases showing how variables are filled and the resulting quality
 3. Failed cases showing where the template structure caused issues
 
-Optimize the template structure around the variables to improve output quality.
+Optimize the template structure around the variables to improve output quality. Keep all {{variable}} placeholders intact.
 
 Return ONLY valid JSON:
 {
@@ -208,21 +230,50 @@ def _evaluate_candidate(candidate_prompt: str, items: list, evaluator_obj: dict,
 
     passed_cases = []
     failed_cases = []
+    target = target_model or os.getenv("CLUCO_OPTIMIZER_TARGET_MODEL", "gpt-4o-mini")
 
     for item in items:
         user_input = str(item.get("input", ""))
         expected_output = str(item.get("expected_output", ""))
 
         try:
-            actual_output = _run_prompt_on_input(candidate_prompt, user_input, target_model)
+            actual_output = _run_prompt_on_input(candidate_prompt, user_input, target)
         except Exception as e:
             logger.warning("Failed to run prompt on input: %s", e)
+            failed_cases.append({
+                "trace_id": item.get("trace_id", "synthetic"),
+                "input": user_input[:1000],
+                "actual_output": f"[LLM ERROR: {e}]",
+                "expected_output": expected_output[:1000],
+                "score": 0, "passed": False,
+                "reasoning": f"LLM invocation failed: {e}",
+            })
             continue
+
+        llm_span = {
+            "span_id": "opt_llm_0",
+            "kind": "llm",
+            "name": f"LLM ({target})",
+            "status": "ok",
+            "latency_ms": 0,
+            "llm": {
+                "model": target,
+                "prompt_messages": [
+                    {"role": "system", "content": candidate_prompt},
+                    {"role": "user", "content": user_input},
+                ],
+                "completion": actual_output,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            },
+        }
 
         ctx = TraceContext(
             trace_id=item.get("trace_id", "optimizer_synthetic"),
             final_input=user_input,
             final_output=actual_output,
+            spans=[llm_span],
+            llm_spans=[llm_span],
         )
 
         try:
@@ -232,9 +283,9 @@ def _evaluate_candidate(candidate_prompt: str, items: list, evaluator_obj: dict,
             )
             entry = {
                 "trace_id": item.get("trace_id", "synthetic"),
-                "input": user_input[:300],
-                "actual_output": actual_output[:300],
-                "expected_output": expected_output[:300],
+                "input": user_input[:1000],
+                "actual_output": actual_output[:1000],
+                "expected_output": expected_output[:1000],
                 "score": result.get("score", 0),
                 "passed": result.get("passed", False),
                 "reasoning": result.get("reasoning", ""),
@@ -245,7 +296,14 @@ def _evaluate_candidate(candidate_prompt: str, items: list, evaluator_obj: dict,
                 failed_cases.append(entry)
         except Exception as e:
             logger.warning("Error evaluating item: %s", e)
-            continue
+            failed_cases.append({
+                "trace_id": item.get("trace_id", "synthetic"),
+                "input": user_input[:1000],
+                "actual_output": actual_output[:1000],
+                "expected_output": expected_output[:1000],
+                "score": 0, "passed": False,
+                "reasoning": f"Evaluation error: {e}",
+            })
 
     total = len(passed_cases) + len(failed_cases)
     pass_rate = round(len(passed_cases) / total * 100, 1) if total else 0
@@ -670,36 +728,106 @@ def _build_strategy_message(strategy: str, current_prompt: str,
         parts.append(f"## Target Model: {target_model}\n")
 
     if failures:
-        parts.append("## Failed Test Cases (agent produced wrong output)")
+        parts.append(f"## Failed Test Cases ({len(failures)} failures — agent produced wrong output)\n")
+
+        # Synthesize failure patterns before showing individual cases
+        pattern_analysis = _synthesize_failure_patterns(failures)
+        if pattern_analysis:
+            parts.append("### Failure Pattern Analysis")
+            parts.append(pattern_analysis)
+            parts.append("")
+
         for i, f in enumerate(failures[:10], 1):
-            parts.append(f"\n### Failure {i}")
-            parts.append(f"Input: {f['input']}")
-            parts.append(f"Actual Output: {f.get('actual_output', f.get('output', ''))}")
+            parts.append(f"### Failure {i}")
+            parts.append(f"**Input:** {f['input']}")
+            parts.append(f"**Actual Output:** {f.get('actual_output', f.get('output', ''))}")
             if f.get("expected_output"):
-                parts.append(f"Expected Output: {f['expected_output']}")
-            parts.append(f"Score: {f['score']}")
-            parts.append(f"Judge Reasoning: {f['reasoning']}")
+                parts.append(f"**Expected Output:** {f['expected_output']}")
+            parts.append(f"**Score:** {f['score']}")
+            parts.append(f"**Judge Reasoning:** {f['reasoning']}")
+            parts.append("")
 
     if successes:
-        parts.append("\n## Successful Test Cases (preserve these behaviors)")
+        parts.append(f"\n## Successful Test Cases ({len(successes)} passed — preserve these behaviors)")
         for i, s in enumerate(successes[:5], 1):
             parts.append(f"\n### Success {i}")
-            parts.append(f"Input: {s['input']}")
-            parts.append(f"Output: {s.get('actual_output', s.get('output', ''))}")
+            parts.append(f"**Input:** {s['input']}")
+            parts.append(f"**Output:** {s.get('actual_output', s.get('output', ''))}")
+            if s.get("expected_output"):
+                parts.append(f"**Expected Output:** {s['expected_output']}")
 
     strategy_instructions = {
-        "failure_driven": "Propose an improved version that fixes the failures while preserving successful behaviors.",
-        "few_shot": "Select the best 3-5 examples from successes and create an enhanced prompt with them embedded as demonstrations.",
-        "instruction_refinement": "Refine the instructions to be clearer and more specific. Focus on preventing the observed failure patterns.",
-        "variable_optimization": "Optimize the template structure around any {{variable}} placeholders. Keep variables intact but improve surrounding text.",
-        "model_aware": f"Adapt the prompt style for optimal performance with {target_model or 'the target model'}.",
+        "failure_driven": (
+            "Analyze the failure patterns above. For EACH failure, determine the root cause "
+            "(wrong category, wrong format, missing constraint, hallucination, etc.). "
+            "Then write an improved prompt that adds explicit rules preventing each failure pattern. "
+            "The improved prompt MUST produce different outputs on the failed inputs."
+        ),
+        "few_shot": (
+            "Select the best 3-5 examples from successes that cover the most diverse input types. "
+            "Also add synthetic examples for input types that appear in failures but not successes. "
+            "Embed examples directly in the prompt before the main instructions."
+        ),
+        "instruction_refinement": (
+            "Map each failure to the specific instruction that caused it. "
+            "Replace vague language with precise rules. Add explicit output format requirements. "
+            "Add a DO NOT section listing common mistakes from the failures."
+        ),
+        "variable_optimization": (
+            "Optimize the template structure around any {{variable}} placeholders. "
+            "Keep variables intact but improve surrounding text."
+        ),
+        "model_aware": (
+            f"Adapt the prompt style for optimal performance with {target_model or 'the target model'}."
+        ),
     }
 
     parts.append("\n## Task")
     parts.append(strategy_instructions.get(strategy, strategy_instructions["failure_driven"]))
-    parts.append("Return ONLY valid JSON as specified.")
+    parts.append("\nReturn ONLY valid JSON as specified in the system message.")
 
     return "\n".join(parts)
+
+
+def _synthesize_failure_patterns(failures: list) -> str:
+    """Analyze failures and produce a structured summary of common error patterns."""
+    if not failures:
+        return ""
+
+    lines = []
+
+    # Build confusion matrix: expected -> actual mappings
+    confusion = {}
+    for f in failures:
+        expected = str(f.get("expected_output", "")).strip().lower()[:100]
+        actual = str(f.get("actual_output", f.get("output", ""))).strip().lower()[:100]
+        if expected and actual:
+            key = (expected, actual)
+            confusion[key] = confusion.get(key, 0) + 1
+
+    if confusion:
+        lines.append("**Confusion matrix (Expected -> Actual, count):**")
+        for (exp, act), count in sorted(confusion.items(), key=lambda x: -x[1]):
+            lines.append(f"  - Expected '{exp}' but got '{act}' ({count}x)")
+
+    # Group by common reasoning themes
+    reasoning_keywords = {}
+    for f in failures:
+        reasoning = str(f.get("reasoning", "")).lower()
+        for keyword in ["format", "category", "classif", "rout", "missing", "wrong",
+                         "hallucin", "incomplete", "incorrect", "irrelevant"]:
+            if keyword in reasoning:
+                reasoning_keywords[keyword] = reasoning_keywords.get(keyword, 0) + 1
+
+    if reasoning_keywords:
+        top_issues = sorted(reasoning_keywords.items(), key=lambda x: -x[1])[:5]
+        lines.append(f"\n**Top failure themes:** {', '.join(f'{k} ({v}x)' for k, v in top_issues)}")
+
+    lines.append(f"\n**Total failures:** {len(failures)}")
+    avg_score = sum(f.get("score", 0) for f in failures) / len(failures) if failures else 0
+    lines.append(f"**Average failure score:** {avg_score:.1f}/100")
+
+    return "\n".join(lines)
 
 
 def _build_optimizer_message(current_prompt: str, failures: list, successes: list) -> str:
@@ -788,6 +916,17 @@ def run_all_strategies_optimization(
     baseline = _evaluate_candidate(current_prompt_text, eval_items, primary_evaluator, store, target_model)
     baseline_pass_rate = baseline["pass_rate"]
 
+    baseline_item_results = []
+    for c in baseline["passed_cases"] + baseline["failed_cases"]:
+        baseline_item_results.append({
+            "input": c["input"][:500],
+            "expected": c["expected_output"][:500],
+            "actual": c["actual_output"][:500],
+            "score": c["score"],
+            "passed": c["passed"],
+            "reasoning": c["reasoning"][:500],
+        })
+
     _upsert_run_progress(store, run_id, {
         "current_phase": "baseline_complete",
         "baseline_pass_rate": baseline_pass_rate,
@@ -795,6 +934,7 @@ def run_all_strategies_optimization(
         "baseline_total": baseline["total"],
         "baseline_passed": baseline["passed"],
         "baseline_failed": baseline["failed"],
+        "baseline_items": baseline_item_results,
     })
 
     strategies_completed = []
@@ -837,6 +977,7 @@ def run_all_strategies_optimization(
                     max_iterations=iters_per_custom,
                     baseline_failed=baseline["failed_cases"],
                     baseline_passed=baseline["passed_cases"],
+                    baseline_pass_rate=baseline_pass_rate,
                 )
             else:
                 from app.dspy_optimizer import run_dspy_strategy
@@ -854,6 +995,8 @@ def run_all_strategies_optimization(
                     target_model=target_model,
                     optimizer_model=opt_model,
                     progress_callback=dspy_progress,
+                    prompt_name=prompt.get("name", ""),
+                    prompt_description=prompt.get("description", ""),
                 )
 
             entry["status"] = result.get("status", "done")
@@ -862,6 +1005,7 @@ def run_all_strategies_optimization(
             entry["passed"] = result.get("passed")
             entry["failed"] = result.get("failed")
             entry["total"] = result.get("total")
+            entry["item_results"] = result.get("item_results", [])
 
             if entry["status"] == "done" and entry["pass_rate"] > best_overall_rate:
                 best_overall_rate = entry["pass_rate"]
@@ -949,16 +1093,18 @@ def _run_single_custom_strategy(
     max_iterations: int,
     baseline_failed: list,
     baseline_passed: list,
+    baseline_pass_rate: float = 0,
 ) -> dict:
     """Run a single custom strategy for a fixed number of iterations.
     Returns dict with pass_rate, prompt_text, changes_summary, status."""
 
     best_prompt = prompt_text
-    best_rate = 0
+    best_rate = baseline_pass_rate
     best_summary = ""
     last_failed = baseline_failed
     last_passed = baseline_passed
     n_candidates = 3
+    improved = False
 
     for iteration in range(1, max_iterations + 1):
         candidates = _generate_candidates(
@@ -988,13 +1134,26 @@ def _run_single_custom_strategy(
             best_rate = rate
             best_prompt = winner["candidate"]["prompt"]
             best_summary = winner["candidate"]["changes_summary"]
+            improved = True
+
+    item_results = []
+    for c in (last_passed or []) + (last_failed or []):
+        item_results.append({
+            "input": c.get("input", "")[:500],
+            "expected": c.get("expected_output", "")[:500],
+            "actual": c.get("actual_output", "")[:500],
+            "score": c.get("score", 0),
+            "passed": c.get("passed", False),
+            "reasoning": c.get("reasoning", "")[:500],
+        })
 
     return {
         "status": "done",
         "pass_rate": best_rate,
         "prompt_text": best_prompt,
-        "changes_summary": best_summary,
+        "changes_summary": best_summary if improved else "No improvement over baseline",
         "passed": len(last_passed) if last_passed else 0,
         "failed": len(last_failed) if last_failed else 0,
         "total": (len(last_passed) + len(last_failed)) if last_passed is not None else 0,
+        "item_results": item_results,
     }

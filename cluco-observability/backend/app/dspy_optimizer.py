@@ -18,6 +18,36 @@ except ImportError:
     logger.info("dspy package not installed — DSPy strategies will be skipped")
 
 
+def _infer_dspy_fields(prompt_name: str, prompt_description: str, eval_items: list) -> tuple:
+    """Infer task-appropriate DSPy field names from prompt metadata.
+    Returns (input_field, output_field) tuple."""
+    name_lower = (prompt_name or "").lower()
+    desc_lower = (prompt_description or "").lower()
+    combined = f"{name_lower} {desc_lower}"
+
+    # Check expected outputs to detect classification tasks
+    if eval_items:
+        outputs = [str(item.get("expected_output", "")).strip() for item in eval_items[:20]]
+        unique_outputs = set(o.lower() for o in outputs if o)
+        avg_len = sum(len(o) for o in outputs if o) / max(len(outputs), 1)
+        is_classification = len(unique_outputs) <= 10 and avg_len < 50
+    else:
+        is_classification = False
+
+    if any(kw in combined for kw in ["rout", "classif", "categor", "triage"]) or is_classification:
+        return ("query", "category")
+    if any(kw in combined for kw in ["summar"]):
+        return ("document", "summary")
+    if any(kw in combined for kw in ["translat"]):
+        return ("text", "translation")
+    if any(kw in combined for kw in ["extract", "ner", "entity"]):
+        return ("text", "entities")
+    if any(kw in combined for kw in ["question", "qa", "answer"]):
+        return ("question", "answer")
+
+    return ("input", "output")
+
+
 def _extract_optimized_prompt(compiled_module) -> str:
     """Extract the full prompt text (instructions + few-shot demos) from a compiled DSPy module."""
     parts = []
@@ -65,6 +95,8 @@ def run_dspy_strategy(
     target_model: str = "gpt-4o-mini",
     optimizer_model: str = "gpt-4o",
     progress_callback: Optional[Callable] = None,
+    prompt_name: str = "",
+    prompt_description: str = "",
 ) -> dict:
     """
     Run a DSPy optimization strategy on the given prompt and dataset.
@@ -106,12 +138,15 @@ def run_dspy_strategy(
     if progress_callback:
         progress_callback("configuring_dspy")
 
+    # Infer task-aware field names from prompt metadata and dataset
+    input_field, output_field = _infer_dspy_fields(prompt_name, prompt_description, eval_items)
+
     train_examples = []
     for item in eval_items:
-        ex = dspy.Example(
-            input=str(item.get("input", "")),
-            expected_output=str(item.get("expected_output", "")),
-        ).with_inputs("input")
+        ex = dspy.Example(**{
+            input_field: str(item.get("input", "")),
+            output_field: str(item.get("expected_output", "")),
+        }).with_inputs(input_field)
         train_examples.append(ex)
 
     if not train_examples:
@@ -122,23 +157,21 @@ def run_dspy_strategy(
             "changes_summary": "No dataset items to train on",
         }
 
-    signature = dspy.Signature(
-        "input -> output",
-        instructions=prompt_text,
-    )
+    sig_str = f"{input_field} -> {output_field}"
+    signature = dspy.Signature(sig_str, instructions=prompt_text)
     module = dspy.ChainOfThought(signature)
 
     def metric(example, pred, trace=None):
         try:
-            pred_output = getattr(pred, 'output', '') or ''
+            pred_output = getattr(pred, output_field, '') or ''
             ctx = TraceContext(
                 trace_id="dspy_opt",
-                final_input=example.input,
+                final_input=getattr(example, input_field, ''),
                 final_output=str(pred_output),
             )
             result = run_single_evaluator(
                 evaluator_obj, ctx,
-                expected_output=example.expected_output,
+                expected_output=getattr(example, output_field, ''),
             )
             passed = result.get("passed", False) or result.get("score", 0) >= 50
             if trace is not None:
@@ -208,8 +241,8 @@ def run_dspy_strategy(
     total_count = 0
     for item in eval_items:
         try:
-            pred = compiled(input=str(item.get("input", "")))
-            pred_output = getattr(pred, 'output', '') or ''
+            pred = compiled(**{input_field: str(item.get("input", ""))})
+            pred_output = getattr(pred, output_field, '') or ''
             ctx = TraceContext(
                 trace_id="dspy_eval",
                 final_input=str(item.get("input", "")),
