@@ -3,10 +3,12 @@ import {
   getEmailRecipients, addEmailRecipient, updateEmailRecipient, deleteEmailRecipient,
   getAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, toggleAlertRule,
   getSmtpConfig, saveSmtpConfig, sendTestEmail, getEmailAlertHistory,
+  getEvaluators, sendAlertEmail,
 } from '../api'
 import {
   Mail, Bell, Settings, Plus, Trash2, Edit2, Power, Send,
   CheckCircle, XCircle, AlertTriangle, Clock, Save, X, ToggleLeft, ToggleRight, History,
+  RefreshCw, ChevronDown, ChevronUp, Eye, Copy, Check, ExternalLink,
 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import { SkeletonTable } from '../components/ui/Skeleton'
@@ -86,16 +88,22 @@ function RulesTab() {
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState(null)
   const [recipients, setRecipients] = useState([])
+  const [evaluators, setEvaluators] = useState([])
   const rulesPg = useClientPagination(allRules)
   const rules = allRules
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [rr, recp] = await Promise.all([getAlertRules(), getEmailRecipients()])
+      const [rr, recp, evalResp] = await Promise.all([
+        getAlertRules(),
+        getEmailRecipients(),
+        getEvaluators({ enabled: true }).catch(() => ({ data: { evaluators: [] } })),
+      ])
       setAllRules(rr.data.rules || [])
       setRecipients(recp.data.recipients || [])
-    } catch { setRules([]) } finally { setLoading(false) }
+      setEvaluators(evalResp.data?.evaluators || evalResp.data || [])
+    } catch { setAllRules([]) } finally { setLoading(false) }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -142,6 +150,7 @@ function RulesTab() {
         <RuleForm
           rule={editing === 'new' ? null : editing}
           recipients={recipients}
+          evaluators={evaluators}
           onSave={handleSave}
           onCancel={() => setEditing(null)}
         />
@@ -168,6 +177,7 @@ function RulesTab() {
                 const cond = rule.condition || {}
                 const opLabel = OPERATORS.find(o => o.value === cond.operator)?.label || cond.operator
                 const metricLabel = METRICS.find(m => m.value === cond.metric)?.label || cond.metric
+                const isEvalRule = cond.metric === 'evaluator_result'
                 return (
                   <tr key={rule._id} className={!rule.enabled ? 'opacity-40' : ''}>
                     <td>
@@ -178,18 +188,36 @@ function RulesTab() {
                     <td>
                       <div className="text-sm font-medium text-slate-800">{rule.name}</div>
                       {rule.description && <div className="text-2xs text-slate-400 mt-0.5">{rule.description}</div>}
+                      {rule.product_id && <div className="text-2xs text-brand-500 mt-0.5">Product: {rule.product_id}</div>}
                     </td>
                     <td>
-                      <code className="text-xs bg-slate-50 px-2 py-0.5 rounded">
-                        {metricLabel} {opLabel} {cond.threshold}
-                      </code>
+                      {isEvalRule ? (
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-xs bg-violet-50 text-violet-700 px-2 py-0.5 rounded font-medium">{cond.evaluator_name || '?'}</span>
+                          <span className="text-xs text-slate-400">=</span>
+                          <span className={`text-xs font-semibold ${cond.expected_value === 'True' ? 'text-green-600' : 'text-red-600'}`}>
+                            {cond.expected_value === 'True' ? 'Pass' : 'Fail'}
+                          </span>
+                        </div>
+                      ) : (
+                        <code className="text-xs bg-slate-50 px-2 py-0.5 rounded">
+                          {metricLabel} {opLabel} {cond.threshold}
+                        </code>
+                      )}
                     </td>
                     <td>
                       <span className={`text-xs font-medium ${rule.severity === 'critical' ? 'text-red-600' : 'text-amber-600'}`}>
                         {rule.severity}
                       </span>
                     </td>
-                    <td className="text-right text-xs text-slate-600 font-mono">{rule.trigger_count || 0}</td>
+                    <td className="text-right">
+                      <span className="text-xs text-slate-600 font-mono">{rule.trigger_count || 0}</span>
+                      {rule.cooldown_minutes > 0 && (
+                        <div className="text-2xs text-slate-400 flex items-center justify-end gap-0.5 mt-0.5">
+                          <Clock size={9} /> {rule.cooldown_minutes}m cooldown
+                        </div>
+                      )}
+                    </td>
                     <td className="text-xs text-slate-400">
                       {rule.last_triggered_at ? new Date(rule.last_triggered_at).toLocaleString() : 'Never'}
                     </td>
@@ -218,7 +246,7 @@ function RulesTab() {
 
 // ── Rule Form ──────────────────────────────────────────────────────────
 
-function RuleForm({ rule, recipients, onSave, onCancel }) {
+function RuleForm({ rule, recipients, evaluators = [], onSave, onCancel }) {
   const [form, setForm] = useState({
     name: rule?.name || '',
     description: rule?.description || '',
@@ -229,11 +257,15 @@ function RuleForm({ rule, recipients, onSave, onCancel }) {
       metric: rule?.condition?.metric || 'total_cost_usd',
       operator: rule?.condition?.operator || 'gt',
       threshold: rule?.condition?.threshold ?? 0,
+      evaluator_name: rule?.condition?.evaluator_name || '',
+      expected_value: rule?.condition?.expected_value || 'False',
     },
     recipient_ids: rule?.recipient_ids || [],
     cooldown_minutes: rule?.cooldown_minutes || 0,
     product_id: rule?.product_id || '',
   })
+
+  const isEvaluatorMetric = form.condition.metric === 'evaluator_result'
 
   const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
   const setCond = (key, val) => setForm(f => ({ ...f, condition: { ...f.condition, [key]: val } }))
@@ -276,15 +308,30 @@ function RuleForm({ rule, recipients, onSave, onCancel }) {
             className="select-field text-xs py-1.5">
             {METRICS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
           </select>
-          {form.condition.metric === 'evaluator_result' ? (
+          {isEvaluatorMetric ? (
             <>
-              <input value={form.condition.evaluator_name || ''} onChange={e => setCond('evaluator_name', e.target.value)}
-                className="input-field w-40 text-xs" placeholder="Evaluator name" />
-              <span className="text-xs text-slate-500">=</span>
+              <select
+                value={form.condition.evaluator_name || ''}
+                onChange={e => setCond('evaluator_name', e.target.value)}
+                className="select-field text-xs py-1.5 min-w-[180px]"
+              >
+                <option value="">— Select Evaluator —</option>
+                {evaluators.map(ev => (
+                  <option key={ev.evaluator_id || ev._id || ev.name} value={ev.name}>
+                    {ev.name}{ev.category ? ` (${ev.category})` : ''}
+                  </option>
+                ))}
+              </select>
+              {form.condition.evaluator_name && !evaluators.some(ev => ev.name === form.condition.evaluator_name) && (
+                <span className="text-[10px] text-amber-600 bg-amber-50 px-2 py-0.5 rounded">
+                  Custom: {form.condition.evaluator_name}
+                </span>
+              )}
+              <span className="text-xs text-slate-500">returns</span>
               <select value={form.condition.expected_value || 'False'} onChange={e => setCond('expected_value', e.target.value)}
-                className="select-field text-xs py-1.5 w-20">
-                <option value="True">True</option>
-                <option value="False">False</option>
+                className="select-field text-xs py-1.5 w-24">
+                <option value="True">Pass (True)</option>
+                <option value="False">Fail (False)</option>
               </select>
             </>
           ) : (
@@ -298,6 +345,17 @@ function RuleForm({ rule, recipients, onSave, onCancel }) {
             </>
           )}
         </div>
+        {isEvaluatorMetric && (
+          <div className="mt-2 ml-8">
+            <label className="block text-[10px] text-slate-400 mb-1">Or type a custom evaluator name:</label>
+            <input
+              value={form.condition.evaluator_name || ''}
+              onChange={e => setCond('evaluator_name', e.target.value)}
+              className="input-field w-60 text-xs"
+              placeholder="custom_evaluator_name"
+            />
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
@@ -347,7 +405,11 @@ function RuleForm({ rule, recipients, onSave, onCancel }) {
 
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="btn-ghost text-xs">Cancel</button>
-        <button onClick={() => onSave(form)} disabled={!form.name.trim()} className="btn-primary text-xs flex items-center gap-1.5">
+        <button
+          onClick={() => onSave(form)}
+          disabled={!form.name.trim() || (isEvaluatorMetric && !form.condition.evaluator_name)}
+          className="btn-primary text-xs flex items-center gap-1.5"
+        >
           <Save size={14} /> {rule ? 'Update Rule' : 'Create Rule'}
         </button>
       </div>
@@ -699,24 +761,90 @@ function SmtpTab() {
 function HistoryTab() {
   const [allAlerts, setAllAlerts] = useState([])
   const [loading, setLoading] = useState(true)
+  const [expandedId, setExpandedId] = useState(null)
+  const [resending, setResending] = useState(null)
+  const [resendResult, setResendResult] = useState(null)
+  const [days, setDays] = useState(30)
   const histPg = useClientPagination(allAlerts)
   const alerts = allAlerts
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true)
-      try {
-        const r = await getEmailAlertHistory({ days: 30, limit: 100 })
-        setAllAlerts(r.data.alerts || [])
-      } catch { setAlerts([]) } finally { setLoading(false) }
-    })()
-  }, [])
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await getEmailAlertHistory({ days, limit: 200 })
+      setAllAlerts(r.data.alerts || [])
+    } catch { setAllAlerts([]) } finally { setLoading(false) }
+  }, [days])
 
-  if (loading) return <SkeletonTable rows={5} cols={5} />
+  useEffect(() => { load() }, [load])
+
+  const handleResend = async (alertId) => {
+    setResending(alertId)
+    setResendResult(null)
+    try {
+      const r = await sendAlertEmail(alertId)
+      setResendResult({ id: alertId, ok: r.data.ok, error: r.data.error || '' })
+      load()
+    } catch (e) {
+      setResendResult({ id: alertId, ok: false, error: e.response?.data?.detail || e.message })
+    } finally { setResending(null) }
+  }
+
+  const statusBadge = (status) => {
+    if (status === 'sent') return (
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+        <CheckCircle size={11} /> Sent
+      </span>
+    )
+    if (status === 'failed') return (
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full">
+        <XCircle size={11} /> Failed
+      </span>
+    )
+    return (
+      <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full">
+        <Clock size={11} /> Unknown
+      </span>
+    )
+  }
+
+  if (loading) return <SkeletonTable rows={5} cols={6} />
+
+  const sentCount = alerts.filter(a => a.email_status === 'sent').length
+  const failedCount = alerts.filter(a => a.email_status === 'failed').length
 
   return (
     <div className="space-y-4">
-      <p className="text-xs text-slate-500">{alerts.length} email alert{alerts.length !== 1 ? 's' : ''} in the last 30 days</p>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-4">
+          <p className="text-xs text-slate-500">{alerts.length} email alert{alerts.length !== 1 ? 's' : ''}</p>
+          {sentCount > 0 && <span className="text-xs text-green-600 flex items-center gap-1"><CheckCircle size={11} /> {sentCount} sent</span>}
+          {failedCount > 0 && <span className="text-xs text-red-600 flex items-center gap-1"><XCircle size={11} /> {failedCount} failed</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-slate-400">Period:</label>
+          <select value={days} onChange={e => setDays(parseInt(e.target.value))} className="select-field text-xs py-1">
+            <option value={7}>Last 7 days</option>
+            <option value={14}>Last 14 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={60}>Last 60 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+          <button onClick={load} className="p-1.5 text-slate-400 hover:text-brand-600 rounded-lg hover:bg-slate-50 transition-colors" title="Refresh">
+            <RefreshCw size={14} />
+          </button>
+        </div>
+      </div>
+
+      {resendResult && (
+        <div className={`px-3 py-2 rounded-lg text-xs flex items-center gap-2 ${
+          resendResult.ok ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'
+        }`}>
+          {resendResult.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
+          {resendResult.ok ? 'Email resent successfully!' : `Resend failed: ${resendResult.error}`}
+          <button onClick={() => setResendResult(null)} className="ml-auto text-slate-400 hover:text-slate-600"><X size={12} /></button>
+        </div>
+      )}
 
       {alerts.length === 0 ? (
         <EmptyState icon={History} title="No email alerts yet" description="When alert rules trigger, email notifications and their history will appear here." />
@@ -725,34 +853,78 @@ function HistoryTab() {
           <table className="data-table">
             <thead>
               <tr>
+                <th className="text-left w-8"></th>
+                <th className="text-left">Status</th>
                 <th className="text-left">Severity</th>
-                <th className="text-left">Rule</th>
-                <th className="text-left">Message</th>
-                <th className="text-left">Sent To</th>
+                <th className="text-left">Rule / Subject</th>
+                <th className="text-left">Recipients</th>
                 <th className="text-left">Date</th>
+                <th className="text-center w-24">Actions</th>
               </tr>
             </thead>
             <tbody>
               {histPg.paginatedData.map((a, i) => {
                 const details = a.details || {}
-                const sentTo = details.email_sent_to || []
+                const sentTo = a.email_recipients || details.email_sent_to || []
+                const isExpanded = expandedId === (a._id || i)
                 return (
-                  <tr key={a._id || i}>
-                    <td>
-                      <span className={`text-xs font-medium ${a.severity === 'critical' ? 'text-red-600' : 'text-amber-600'}`}>
-                        {a.severity === 'critical' ? <AlertTriangle size={12} className="inline mr-1" /> : <Bell size={12} className="inline mr-1" />}
-                        {a.severity}
-                      </span>
-                    </td>
-                    <td className="text-xs font-medium text-slate-700">{details.rule_name || '-'}</td>
-                    <td className="text-xs text-slate-600 max-w-sm truncate">{a.message}</td>
-                    <td className="text-xs text-slate-500">
-                      {sentTo.length > 0 ? sentTo.join(', ') : '-'}
-                    </td>
-                    <td className="text-xs text-slate-400">
-                      {a.created_at ? new Date(a.created_at).toLocaleString() : '-'}
-                    </td>
-                  </tr>
+                  <>
+                    <tr key={a._id || i} className={`cursor-pointer hover:bg-slate-50 transition-colors ${isExpanded ? 'bg-slate-50' : ''}`}>
+                      <td>
+                        <button onClick={() => setExpandedId(isExpanded ? null : (a._id || i))} className="text-slate-400 hover:text-slate-600 transition-colors">
+                          {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                        </button>
+                      </td>
+                      <td>{statusBadge(a.email_status)}</td>
+                      <td>
+                        <span className={`text-xs font-medium ${a.severity === 'critical' ? 'text-red-600' : 'text-amber-600'}`}>
+                          {a.severity === 'critical' ? <AlertTriangle size={12} className="inline mr-1" /> : <Bell size={12} className="inline mr-1" />}
+                          {a.severity}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="text-xs font-medium text-slate-700">{details.rule_name || '-'}</div>
+                        {a.email_subject && <div className="text-2xs text-slate-400 mt-0.5 truncate max-w-xs" title={a.email_subject}>{a.email_subject}</div>}
+                      </td>
+                      <td className="text-xs text-slate-500">
+                        {sentTo.length > 0 ? (
+                          <div className="space-y-0.5">
+                            {sentTo.slice(0, 2).map((e, idx) => <div key={idx} className="truncate max-w-[180px]">{e}</div>)}
+                            {sentTo.length > 2 && <div className="text-2xs text-slate-400">+{sentTo.length - 2} more</div>}
+                          </div>
+                        ) : '-'}
+                      </td>
+                      <td className="text-xs text-slate-400 whitespace-nowrap">
+                        {a.created_at ? new Date(a.created_at).toLocaleString() : '-'}
+                      </td>
+                      <td className="text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setExpandedId(isExpanded ? null : (a._id || i)) }}
+                            className="p-1 text-slate-400 hover:text-brand-600 transition-colors"
+                            title="View Details"
+                          >
+                            <Eye size={14} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleResend(a._id) }}
+                            disabled={resending === a._id}
+                            className="p-1 text-slate-400 hover:text-green-600 transition-colors disabled:opacity-40"
+                            title="Resend Email"
+                          >
+                            {resending === a._id ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} />}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {isExpanded && (
+                      <tr key={`${a._id || i}-detail`}>
+                        <td colSpan={7} className="p-0">
+                          <EmailDetailPanel alert={a} />
+                        </td>
+                      </tr>
+                    )}
+                  </>
                 )
               })}
             </tbody>
@@ -760,6 +932,148 @@ function HistoryTab() {
           <Pagination currentPage={histPg.page} totalItems={histPg.totalItems} pageSize={histPg.pageSize} onPageChange={histPg.setPage} onPageSizeChange={histPg.setPageSize} />
         </div>
       )}
+    </div>
+  )
+}
+
+
+// ── Email Detail Panel (expanded row) ──────────────────────────────────
+
+function EmailDetailPanel({ alert }) {
+  const [showHtml, setShowHtml] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const details = alert.details || {}
+  const sentTo = alert.email_recipients || details.email_sent_to || []
+
+  const handleCopy = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {}
+  }
+
+  return (
+    <div className="bg-slate-50 border-t border-slate-200 p-4 space-y-4 animate-fade-in">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Left: Alert Info */}
+        <div className="space-y-3">
+          <div>
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Alert Message</span>
+            <p className="text-sm text-slate-700 mt-1">{alert.message || '-'}</p>
+          </div>
+
+          <div>
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Trace ID</span>
+            <div className="flex items-center gap-2 mt-1">
+              <code className="text-xs font-mono bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-600">
+                {alert.trace_id || '-'}
+              </code>
+              {alert.trace_id && (
+                <a href={`/traces/${alert.trace_id}`} className="text-brand-600 hover:text-brand-700 transition-colors" title="View Trace">
+                  <ExternalLink size={12} />
+                </a>
+              )}
+            </div>
+          </div>
+
+          {Object.keys(details).length > 0 && (
+            <div>
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Rule Details</span>
+              <div className="mt-1 space-y-1">
+                {Object.entries(details).filter(([k]) => k !== 'email_sent_to' && k !== 'rule_name').map(([k, v]) => (
+                  <div key={k} className="flex items-baseline gap-2">
+                    <span className="text-2xs text-slate-400 min-w-[80px]">{k}:</span>
+                    <span className="text-xs text-slate-700 font-medium">{String(v)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Recipients</span>
+            <div className="mt-1 flex flex-wrap gap-1.5">
+              {sentTo.map((email, idx) => (
+                <span key={idx} className="text-xs bg-white border border-slate-200 px-2 py-0.5 rounded-full text-slate-600">
+                  <Mail size={10} className="inline mr-1 text-slate-400" />{email}
+                </span>
+              ))}
+              {sentTo.length === 0 && <span className="text-xs text-slate-400">No recipients recorded</span>}
+            </div>
+          </div>
+
+          {alert.email_status === 'failed' && alert.email_error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-red-500">Error</span>
+              <p className="text-xs text-red-700 mt-1 font-mono">{alert.email_error}</p>
+            </div>
+          )}
+
+          {alert.last_resent_at && (
+            <div className="text-2xs text-slate-400">
+              Last resent: {new Date(alert.last_resent_at).toLocaleString()}
+            </div>
+          )}
+        </div>
+
+        {/* Right: Email Preview */}
+        <div className="space-y-3">
+          {alert.email_subject && (
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Email Subject</span>
+                <button onClick={() => handleCopy(alert.email_subject)} className="p-0.5 text-slate-400 hover:text-slate-600 transition-colors" title="Copy">
+                  {copied ? <Check size={11} className="text-green-500" /> : <Copy size={11} />}
+                </button>
+              </div>
+              <p className="text-sm font-medium text-slate-800 mt-1 bg-white border border-slate-200 rounded-lg px-3 py-2">{alert.email_subject}</p>
+            </div>
+          )}
+
+          {alert.email_body_html && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Email Body</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowHtml(!showHtml)}
+                    className="text-2xs text-brand-600 hover:text-brand-700 font-medium"
+                  >
+                    {showHtml ? 'Preview' : 'HTML Source'}
+                  </button>
+                </div>
+              </div>
+              {showHtml ? (
+                <pre className="text-[10px] font-mono bg-white border border-slate-200 rounded-lg p-3 max-h-64 overflow-auto whitespace-pre-wrap break-words text-slate-600">
+                  {alert.email_body_html}
+                </pre>
+              ) : (
+                <div
+                  className="bg-white border border-slate-200 rounded-lg p-3 max-h-64 overflow-auto text-sm"
+                  dangerouslySetInnerHTML={{ __html: alert.email_body_html }}
+                />
+              )}
+            </div>
+          )}
+
+          {!alert.email_body_html && alert.email_body_text && (
+            <div>
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Email Body (Text)</span>
+              <pre className="text-xs font-mono bg-white border border-slate-200 rounded-lg p-3 mt-1 max-h-48 overflow-auto whitespace-pre-wrap text-slate-600">
+                {alert.email_body_text}
+              </pre>
+            </div>
+          )}
+
+          {!alert.email_subject && !alert.email_body_html && !alert.email_body_text && (
+            <div className="bg-slate-100 rounded-lg p-4 text-center">
+              <p className="text-xs text-slate-400">No email content recorded for this alert.</p>
+              <p className="text-2xs text-slate-400 mt-1">Older alerts may not have email body data stored.</p>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

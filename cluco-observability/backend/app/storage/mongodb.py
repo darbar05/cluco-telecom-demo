@@ -1814,6 +1814,12 @@ class MongoTraceStore:
             "details": data.get("details", {}),
             "acknowledged": False,
             "created_at": now,
+            "email_subject": data.get("email_subject", ""),
+            "email_body_html": data.get("email_body_html", ""),
+            "email_body_text": data.get("email_body_text", ""),
+            "email_status": data.get("email_status", ""),
+            "email_error": data.get("email_error", ""),
+            "email_recipients": data.get("email_recipients", []),
         }
         self._alerts.insert_one(doc)
         return {"ok": True}

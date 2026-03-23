@@ -2466,8 +2466,9 @@ def acknowledge_alert(alert_id: str) -> dict:
 def resend_alert_email(alert_id: str) -> dict:
     """Resend an alert as email to configured recipients."""
     from app.storage.mongodb import _get_db
-    from app.email_alerts import send_email, get_effective_smtp_config
+    from app.email_alerts import send_email
     from bson import ObjectId
+    from datetime import datetime
 
     db = _get_db()
     alert = db["alerts"].find_one({"_id": ObjectId(alert_id)})
@@ -2479,21 +2480,41 @@ def resend_alert_email(alert_id: str) -> dict:
     if not to_emails:
         raise HTTPException(status_code=400, detail="No active email recipients configured")
 
-    subject = f"[Cluco Alert] {alert.get('severity', 'warning').upper()}: {alert.get('alert_type', 'alert')}"
-    html = f"""
-    <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-      <div style="background: {'#dc2626' if alert.get('severity') == 'critical' else '#d97706'}; color: white; padding: 16px 24px; border-radius: 8px 8px 0 0;">
-        <h2 style="margin: 0; font-size: 16px;">{alert.get('alert_type', 'Alert')} — {alert.get('severity', 'warning')}</h2>
-      </div>
-      <div style="background: #fff; border: 1px solid #e2e8f0; border-top: none; padding: 20px 24px; border-radius: 0 0 8px 8px;">
-        <p style="color: #334155; font-size: 14px; margin: 0 0 12px;">{alert.get('message', '')}</p>
-        <p style="color: #64748b; font-size: 12px; margin: 0;">Trace: {alert.get('trace_id', 'N/A')}</p>
-        <p style="color: #94a3b8; font-size: 11px; margin: 12px 0 0;">Resent from Cluco Observability</p>
-      </div>
-    </div>
-    """
+    stored_subject = alert.get("email_subject")
+    stored_html = alert.get("email_body_html")
+
+    if stored_subject and stored_html:
+        subject = stored_subject
+        html = stored_html
+    else:
+        subject = f"[Cluco Alert] {alert.get('severity', 'warning').upper()}: {alert.get('alert_type', 'alert')}"
+        html = f"""
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+          <div style="background: {'#dc2626' if alert.get('severity') == 'critical' else '#d97706'}; color: white; padding: 16px 24px; border-radius: 8px 8px 0 0;">
+            <h2 style="margin: 0; font-size: 16px;">{alert.get('alert_type', 'Alert')} — {alert.get('severity', 'warning')}</h2>
+          </div>
+          <div style="background: #fff; border: 1px solid #e2e8f0; border-top: none; padding: 20px 24px; border-radius: 0 0 8px 8px;">
+            <p style="color: #334155; font-size: 14px; margin: 0 0 12px;">{alert.get('message', '')}</p>
+            <p style="color: #64748b; font-size: 12px; margin: 0;">Trace: {alert.get('trace_id', 'N/A')}</p>
+            <p style="color: #94a3b8; font-size: 11px; margin: 12px 0 0;">Resent from Cluco Observability</p>
+          </div>
+        </div>
+        """
+
     result = send_email(to_emails, subject, html)
-    return {"ok": result.get("ok", False), "sent_to": to_emails}
+
+    email_status = "sent" if result.get("ok") else "failed"
+    db["alerts"].update_one(
+        {"_id": ObjectId(alert_id)},
+        {"$set": {
+            "email_status": email_status,
+            "email_error": result.get("error", "") if not result.get("ok") else "",
+            "email_recipients": to_emails,
+            "last_resent_at": datetime.utcnow(),
+        }},
+    )
+
+    return {"ok": result.get("ok", False), "sent_to": to_emails, "email_status": email_status, "error": result.get("error", "")}
 
 
 # ── Email Alert System ────────────────────────────────────────────────

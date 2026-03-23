@@ -392,9 +392,11 @@ def dispatch_alert_emails(trace_data: dict, triggered_rules: list):
         }
 
         subject, html, text = _build_alert_email(alert_data, rule)
-        send_email_async(to_emails, subject, html, text)
+        send_result = send_email(to_emails, subject, html, text)
 
-        # Also store the alert in the alerts collection
+        email_status = "sent" if send_result.get("ok") else "failed"
+        email_error = send_result.get("error", "") if not send_result.get("ok") else ""
+
         try:
             from app.storage import get_trace_store
             store = get_trace_store()
@@ -409,6 +411,12 @@ def dispatch_alert_emails(trace_data: dict, triggered_rules: list):
                     "email_sent_to": to_emails,
                     **alert_data["details"],
                 },
+                "email_subject": subject,
+                "email_body_html": html,
+                "email_body_text": text,
+                "email_status": email_status,
+                "email_error": email_error,
+                "email_recipients": to_emails,
             })
         except Exception as e:
             logger.debug("Could not store alert record: %s", e)
