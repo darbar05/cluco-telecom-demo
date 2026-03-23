@@ -51,11 +51,16 @@ def _get_smtp_config_from_db() -> Optional[dict]:
 
 
 def get_effective_smtp_config() -> dict:
-    """DB config takes priority over env vars."""
+    """DB config takes priority, but falls back to env if DB config is incomplete."""
     db_config = _get_smtp_config_from_db()
-    if db_config and db_config.get("host"):
+    if db_config and db_config.get("host") and db_config.get("password"):
         return db_config
-    return _get_smtp_config()
+    env_config = _get_smtp_config()
+    if db_config and db_config.get("host") and not db_config.get("password"):
+        if env_config.get("password"):
+            db_config["password"] = env_config["password"]
+            return db_config
+    return env_config
 
 
 def save_smtp_config(config: dict) -> dict:
@@ -92,10 +97,19 @@ def send_email(to_emails: list, subject: str, html_body: str,
                text_body: str = "") -> dict:
     """Send an email via SMTP. Runs synchronously — call in a thread for async."""
     config = get_effective_smtp_config()
+    logger.info("[email] send_email called — host=%s port=%s user=%s tls=%s enabled=%s recipients=%s",
+                config.get("host"), config.get("port"), config.get("username"),
+                config.get("use_tls"), config.get("enabled"), to_emails)
+
     if not config.get("enabled"):
+        logger.warning("[email] SMTP disabled (enabled=%s)", config.get("enabled"))
         return {"ok": False, "error": "SMTP not enabled"}
     if not config.get("host"):
+        logger.warning("[email] SMTP host empty")
         return {"ok": False, "error": "SMTP host not configured"}
+    if not config.get("password"):
+        logger.warning("[email] SMTP password empty — cannot authenticate")
+        return {"ok": False, "error": "SMTP password not configured"}
     if not to_emails:
         return {"ok": False, "error": "No recipients"}
 
@@ -109,23 +123,32 @@ def send_email(to_emails: list, subject: str, html_body: str,
             msg.attach(MIMEText(text_body, "plain"))
         msg.attach(MIMEText(html_body, "html"))
 
+        logger.info("[email] Connecting to %s:%s (TLS=%s)...", config["host"], config["port"], config.get("use_tls"))
+        server = smtplib.SMTP(config["host"], config["port"], timeout=20)
+        server.ehlo()
         if config.get("use_tls"):
-            server = smtplib.SMTP(config["host"], config["port"], timeout=15)
-            server.ehlo()
             server.starttls()
-        else:
-            server = smtplib.SMTP(config["host"], config["port"], timeout=15)
             server.ehlo()
 
         if config.get("username") and config.get("password"):
+            logger.info("[email] Authenticating as %s ...", config["username"])
             server.login(config["username"], config["password"])
 
         server.sendmail(config["from_email"], to_emails, msg.as_string())
         server.quit()
-        logger.info("[email] Sent to %s: %s", to_emails, subject)
+        logger.info("[email] Sent successfully to %s: %s", to_emails, subject)
         return {"ok": True, "recipients": len(to_emails)}
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error("[email] SMTP auth failed (code=%s): %s", e.smtp_code, e.smtp_error)
+        return {"ok": False, "error": f"SMTP authentication failed: {e.smtp_error}"}
+    except smtplib.SMTPConnectError as e:
+        logger.error("[email] SMTP connection failed: %s", e)
+        return {"ok": False, "error": f"Could not connect to {config['host']}:{config['port']}: {e}"}
+    except smtplib.SMTPException as e:
+        logger.error("[email] SMTP error: %s", e)
+        return {"ok": False, "error": f"SMTP error: {e}"}
     except Exception as e:
-        logger.warning("[email] Send failed: %s", e)
+        logger.error("[email] Unexpected send failure: %s", e, exc_info=True)
         return {"ok": False, "error": str(e)}
 
 
@@ -199,7 +222,7 @@ def _build_test_email() -> tuple:
 
 def evaluate_rules_for_trace(trace_data: dict) -> list:
     """Evaluate all active alert rules against a finalized trace.
-    Returns list of triggered rule dicts."""
+    Returns list of triggered rule dicts (respecting cooldown_minutes)."""
     try:
         from app.storage.mongodb import _get_db
         db = _get_db()
@@ -207,10 +230,39 @@ def evaluate_rules_for_trace(trace_data: dict) -> list:
     except Exception:
         return []
 
+    now = datetime.utcnow()
     triggered = []
     for rule in rules:
-        if _rule_matches(rule, trace_data):
-            triggered.append(rule)
+        if not _rule_matches(rule, trace_data):
+            continue
+
+        cooldown = rule.get("cooldown_minutes", 0)
+        if cooldown and cooldown > 0:
+            last_triggered = rule.get("last_triggered_at")
+            if last_triggered:
+                if isinstance(last_triggered, str):
+                    try:
+                        last_triggered = datetime.fromisoformat(last_triggered)
+                    except (ValueError, TypeError):
+                        last_triggered = None
+                if last_triggered and (now - last_triggered).total_seconds() < cooldown * 60:
+                    logger.info("[alert] Rule '%s' skipped — cooldown %dm not elapsed (last fired %s)",
+                                rule.get("name"), cooldown, last_triggered)
+                    continue
+
+        triggered.append(rule)
+
+        try:
+            from app.storage.mongodb import _get_db
+            db = _get_db()
+            from bson import ObjectId
+            db["alert_rules"].update_one(
+                {"_id": ObjectId(rule["_id"]) if isinstance(rule["_id"], str) else rule["_id"]},
+                {"$set": {"last_triggered_at": now}},
+            )
+        except Exception as e:
+            logger.debug("Could not update last_triggered_at for rule %s: %s", rule.get("name"), e)
+
     return triggered
 
 

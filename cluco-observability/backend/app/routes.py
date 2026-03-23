@@ -11,76 +11,85 @@ logger = logging.getLogger("cluco.routes")
 router = APIRouter()
 
 
-def _run_judge_monitors_for_trace(store, trace_id: str, trace_doc: dict | None):
-    """Run active judge monitors on a finalized trace. Safe to call from ingest or finalize flows."""
+def _run_judge_monitors_for_trace(store, trace_id: str, trace_doc: dict | None,
+                                   run_alert_rules_after: bool = False):
+    """Run active judge monitors on a finalized trace. Safe to call from ingest or finalize flows.
+
+    When ``run_alert_rules_after`` is True, alert-rule evaluation runs *after*
+    all judge monitors have written their feedback so that evaluator_result
+    conditions see up-to-date data.
+    """
     import threading
     import random
 
     try:
         active_monitors = store.get_active_judge_monitors()
-        if not active_monitors or not trace_doc:
+        has_monitors = active_monitors and trace_doc
+        if not has_monitors and not run_alert_rules_after:
             return
-        logger.info("Auto-evaluate: running %d judge monitor(s) for trace %s", len(active_monitors), trace_id)
+        if has_monitors:
+            logger.info("Auto-evaluate: running %d judge monitor(s) for trace %s", len(active_monitors), trace_id)
 
         def _run_online_judges():
             try:
-                from app.evaluation_engine import TraceContext, run_single_evaluator
-                trace_data = store.get(trace_id)
-                if not trace_data:
-                    logger.warning("Auto-evaluate: trace %s not found for evaluation", trace_id)
-                    return
-                context = TraceContext.from_trace_dict(trace_data)
-                for mon in active_monitors:
-                    try:
-                        if random.random() * 100 > mon.get("sample_rate", 100):
-                            continue
-                        mon_filters = mon.get("filters", {})
-                        if mon_filters.get("product_id") and trace_doc.get("product_id") != mon_filters["product_id"]:
-                            continue
-                        if mon_filters.get("service_name") and trace_doc.get("service_name") != mon_filters["service_name"]:
-                            continue
-                        evaluator = store.get_evaluator(mon["evaluator_id"])
-                        if not evaluator:
-                            continue
-                        # Use stored evaluator_config from monitor when it has a proper rubric (saved when
-                        # enabling auto-evaluate in Evaluators Hub). Otherwise prefer DB, but if DB has
-                        # default/empty rubric for a routing evaluator, apply routing rubric + boolean.
-                        cfg = dict(evaluator.get("config") or {})
-                        mon_config = mon.get("evaluator_config")
-                        if mon_config and isinstance(mon_config, dict):
-                            stored_rubric = (mon_config.get("rubric") or "").strip()
-                            if stored_rubric and not stored_rubric.startswith("Evaluate the quality of the output"):
-                                cfg.update({k: v for k, v in mon_config.items() if v is not None})
-                                logger.debug("Auto-evaluate: using evaluator_config from monitor for %s", mon.get("evaluator_id"))
-                        rubric = (cfg.get("rubric") or "").strip()
-                        name_lower = (evaluator.get("name") or "").lower()
-                        cat = (evaluator.get("category") or "").lower()
-                        is_routing = "routing" in name_lower or cat == "agent"
-                        if is_routing and (not rubric or rubric.startswith("Evaluate the quality of the output")):
-                            cfg["rubric"] = (
-                                "You are evaluating an AI agent's routing decisions. Use the Full Trace Context.\n"
-                                "Determine: 1) User's query 2) Which sub-agent was selected (routing_decision, selected_agent) "
-                                "3) Was this correct given the query's PRIMARY intent?\n"
-                                "Be strict: passed=true only when routing was clearly correct. "
-                                "passed=false if wrong or uncertain. Billing/pricing questions should route to billing, not support."
+                if has_monitors:
+                    from app.evaluation_engine import TraceContext, run_single_evaluator
+                    trace_data = store.get(trace_id)
+                    if not trace_data:
+                        logger.warning("Auto-evaluate: trace %s not found for evaluation", trace_id)
+                        return
+                    context = TraceContext.from_trace_dict(trace_data)
+                    for mon in active_monitors:
+                        try:
+                            if random.random() * 100 > mon.get("sample_rate", 100):
+                                continue
+                            mon_filters = mon.get("filters", {})
+                            if mon_filters.get("product_id") and trace_doc.get("product_id") != mon_filters["product_id"]:
+                                continue
+                            if mon_filters.get("service_name") and trace_doc.get("service_name") != mon_filters["service_name"]:
+                                continue
+                            evaluator = store.get_evaluator(mon["evaluator_id"])
+                            if not evaluator:
+                                continue
+                            cfg = dict(evaluator.get("config") or {})
+                            mon_config = mon.get("evaluator_config")
+                            if mon_config and isinstance(mon_config, dict):
+                                stored_rubric = (mon_config.get("rubric") or "").strip()
+                                if stored_rubric and not stored_rubric.startswith("Evaluate the quality of the output"):
+                                    cfg.update({k: v for k, v in mon_config.items() if v is not None})
+                                    logger.debug("Auto-evaluate: using evaluator_config from monitor for %s", mon.get("evaluator_id"))
+                            rubric = (cfg.get("rubric") or "").strip()
+                            name_lower = (evaluator.get("name") or "").lower()
+                            cat = (evaluator.get("category") or "").lower()
+                            is_routing = "routing" in name_lower or cat == "agent"
+                            if is_routing and (not rubric or rubric.startswith("Evaluate the quality of the output")):
+                                cfg["rubric"] = (
+                                    "You are evaluating an AI agent's routing decisions. Use the Full Trace Context.\n"
+                                    "Determine: 1) User's query 2) Which sub-agent was selected (routing_decision, selected_agent) "
+                                    "3) Was this correct given the query's PRIMARY intent?\n"
+                                    "Be strict: passed=true only when routing was clearly correct. "
+                                    "passed=false if wrong or uncertain. Billing/pricing questions should route to billing, not support."
+                                )
+                                cfg["output_type"] = "boolean"
+                                logger.info("Auto-evaluate: applied routing rubric+boolean for %s", mon.get("evaluator_id"))
+                            evaluator = dict(evaluator, config=cfg)
+                            result = run_single_evaluator(evaluator, context)
+                            store.add_feedback(
+                                trace_id=trace_id,
+                                key=evaluator.get("name", mon["evaluator_id"]),
+                                score=result.get("score"),
+                                value="True" if result.get("passed", (result.get("score", 0) or 0) >= 50) else "False",
+                                comment=result.get("reasoning", ""),
+                                source="judge",
                             )
-                            cfg["output_type"] = "boolean"
-                            logger.info("Auto-evaluate: applied routing rubric+boolean for %s", mon.get("evaluator_id"))
-                        evaluator = dict(evaluator, config=cfg)
-                        result = run_single_evaluator(evaluator, context)
-                        store.add_feedback(
-                            trace_id=trace_id,
-                            key=evaluator.get("name", mon["evaluator_id"]),
-                            score=result.get("score"),
-                            value="True" if result.get("passed", (result.get("score", 0) or 0) >= 50) else "False",
-                            comment=result.get("reasoning", ""),
-                            source="judge",
-                        )
-                        logger.debug("Auto-evaluate: evaluator %s completed for trace %s", mon.get("evaluator_id"), trace_id)
-                    except Exception as e:
-                        logger.warning("Auto-evaluate: evaluator %s failed for trace %s: %s", mon.get("evaluator_id"), trace_id, e)
+                            logger.debug("Auto-evaluate: evaluator %s completed for trace %s", mon.get("evaluator_id"), trace_id)
+                        except Exception as e:
+                            logger.warning("Auto-evaluate: evaluator %s failed for trace %s: %s", mon.get("evaluator_id"), trace_id, e)
             except Exception as e:
                 logger.warning("Auto-evaluate: judge monitors failed for trace %s: %s", trace_id, e)
+
+            if run_alert_rules_after and trace_doc:
+                _evaluate_alert_rules_for_trace(store, trace_id, trace_doc)
 
         threading.Thread(
             target=_run_online_judges,
@@ -89,6 +98,26 @@ def _run_judge_monitors_for_trace(store, trace_id: str, trace_doc: dict | None):
         ).start()
     except Exception as e:
         logger.warning("Auto-evaluate: could not start judge monitors for trace %s: %s", trace_id, e)
+
+
+def _evaluate_alert_rules_for_trace(store, trace_id: str, trace_doc: dict):
+    """Evaluate email alert rules for a trace. Re-fetches trace data to capture latest feedback."""
+    try:
+        from app.email_alerts import evaluate_rules_for_trace, dispatch_alert_emails
+        fresh_trace = store.get(trace_id)
+        if not fresh_trace:
+            fresh_trace = trace_doc
+        triggered = evaluate_rules_for_trace(fresh_trace)
+        if triggered:
+            import threading
+            threading.Thread(
+                target=dispatch_alert_emails,
+                args=(fresh_trace, triggered),
+                daemon=True,
+                name="email-rule-eval",
+            ).start()
+    except Exception as e:
+        logger.warning("Alert rule evaluation failed for trace %s: %s", trace_id, e)
 
 
 @router.get("/health")
@@ -589,27 +618,11 @@ async def finalize_trace(trace_id: str, request: Request, body: dict = Body(defa
     except Exception:
         pass
 
-    # ── Evaluate email alert rules against the finalized trace ──
+    # ── Run online judge monitors, then evaluate alert rules AFTER judges complete ──
     try:
-        from app.email_alerts import evaluate_rules_for_trace, dispatch_alert_emails
-        if trace_doc:
-            triggered = evaluate_rules_for_trace(trace_doc)
-            if triggered:
-                import threading
-                threading.Thread(
-                    target=dispatch_alert_emails,
-                    args=(trace_doc, triggered),
-                    daemon=True,
-                    name="email-rule-eval",
-                ).start()
+        _run_judge_monitors_for_trace(store, trace_id, trace_doc, run_alert_rules_after=True)
     except Exception:
-        pass  # never let email failures break trace finalization
-
-    # ── Run online judge monitors on the finalized trace ──
-    try:
-        _run_judge_monitors_for_trace(store, trace_id, trace_doc)
-    except Exception:
-        pass  # never let judge failures break trace finalization
+        pass  # never let judge/alert failures break trace finalization
 
     return result
 
@@ -1735,7 +1748,6 @@ def run_evaluator_on_traces(evaluator_id: str, body: dict = Body(...)) -> dict:
     if not evaluator:
         raise HTTPException(status_code=404, detail="Evaluator not found")
 
-    # Use evaluator_config from frontend (Evaluations Hub prompts) when provided
     config_override = body.get("evaluator_config") or body.get("config_override")
     if config_override and isinstance(config_override, dict):
         cfg = dict(evaluator.get("config") or {})
@@ -1754,6 +1766,8 @@ def run_evaluator_on_traces(evaluator_id: str, body: dict = Body(...)) -> dict:
 
     max_workers = min(body.get("max_workers", 8), 16, len(trace_ids))
 
+    evaluated_trace_ids = []
+
     def _evaluate_single(tid):
         trace = store.get(tid)
         if not trace:
@@ -1770,6 +1784,7 @@ def run_evaluator_on_traces(evaluator_id: str, body: dict = Body(...)) -> dict:
                 comment=result.get("reasoning", ""),
                 source="judge",
             )
+            evaluated_trace_ids.append(tid)
             return result
         except Exception as e:
             return {"trace_id": tid, "error": str(e)}
@@ -1779,6 +1794,14 @@ def run_evaluator_on_traces(evaluator_id: str, body: dict = Body(...)) -> dict:
         futures = {executor.submit(_evaluate_single, tid): tid for tid in trace_ids}
         for future in as_completed(futures):
             results.append(future.result())
+
+    for tid in evaluated_trace_ids:
+        try:
+            trace_doc = store.get(tid)
+            if trace_doc:
+                _evaluate_alert_rules_for_trace(store, tid, trace_doc)
+        except Exception:
+            pass
 
     passed = sum(1 for r in results if r.get("passed") or (r.get("score", 0) >= 50 and "error" not in r))
     logger.debug(
@@ -1808,7 +1831,6 @@ def run_evaluator_on_all_traces(evaluator_id: str, body: dict = Body(default={})
     if not evaluator:
         raise HTTPException(status_code=404, detail="Evaluator not found")
 
-    # Use evaluator_config from frontend (Evaluations Hub prompts) when provided
     config_override = body.get("evaluator_config") or body.get("config_override")
     if config_override and isinstance(config_override, dict):
         merged = dict(evaluator.get("config") or {})
@@ -1829,6 +1851,8 @@ def run_evaluator_on_all_traces(evaluator_id: str, body: dict = Body(default={})
     if not trace_ids:
         return {"ok": True, "total": 0, "passed": 0, "pass_rate": 0, "results": []}
 
+    evaluated_trace_ids = []
+
     def _evaluate_single(tid):
         trace = store.get(tid)
         if not trace:
@@ -1845,6 +1869,7 @@ def run_evaluator_on_all_traces(evaluator_id: str, body: dict = Body(default={})
                 comment=result.get("reasoning", ""),
                 source="judge",
             )
+            evaluated_trace_ids.append(tid)
             return result
         except Exception as e:
             return {"trace_id": tid, "error": str(e)}
@@ -1854,6 +1879,14 @@ def run_evaluator_on_all_traces(evaluator_id: str, body: dict = Body(default={})
         futures = {executor.submit(_evaluate_single, tid): tid for tid in trace_ids}
         for future in as_completed(futures):
             results.append(future.result())
+
+    for tid in evaluated_trace_ids:
+        try:
+            trace_doc = store.get(tid)
+            if trace_doc:
+                _evaluate_alert_rules_for_trace(store, tid, trace_doc)
+        except Exception:
+            pass
 
     passed = sum(1 for r in results if r.get("passed") or (r.get("score", 0) >= 50 and "error" not in r))
     logger.debug(
@@ -2627,9 +2660,21 @@ def save_smtp_config(payload: SmtpConfigPayload) -> dict:
 
 @router.post("/email/test")
 def send_test_email(to_email: str = Body(..., embed=True)) -> dict:
-    from app.email_alerts import send_email, _build_test_email
+    from app.email_alerts import send_email, _build_test_email, get_effective_smtp_config
+    config = get_effective_smtp_config()
+    config_summary = {
+        "host": config.get("host", ""),
+        "port": config.get("port", ""),
+        "username": config.get("username", ""),
+        "password_set": bool(config.get("password")),
+        "use_tls": config.get("use_tls"),
+        "enabled": config.get("enabled"),
+        "from_email": config.get("from_email", ""),
+    }
     subject, html, text = _build_test_email()
-    return send_email([to_email], subject, html, text)
+    result = send_email([to_email], subject, html, text)
+    result["smtp_config"] = config_summary
+    return result
 
 
 @router.get("/email/history")

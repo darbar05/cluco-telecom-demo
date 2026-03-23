@@ -4,8 +4,10 @@ import {
   Radio, Activity, Clock, DollarSign, Zap, CheckCircle, XCircle,
   Wifi, WifiOff, Trash2, ChevronDown, ChevronRight, Bot, Cpu,
   MessageSquare, Wrench, Search, Database, Layers, Filter, Copy, Check,
-  ChevronUp, User, PlugZap, Unplug, GitBranch, FileText, Eye, EyeOff
+  ChevronUp, User, PlugZap, Unplug, GitBranch, FileText, Eye, EyeOff,
+  AlertTriangle, Bell, BellOff, ArrowDownToLine, Pause, TrendingUp
 } from 'lucide-react'
+import { AreaChart, Area, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
 import PageHeader from '../components/ui/PageHeader'
 import EmptyState from '../components/ui/EmptyState'
 
@@ -693,6 +695,13 @@ export default function LiveMonitorPage() {
   const reconnectTimer = useRef(null)
   const [elapsedTick, setElapsedTick] = useState(0)
 
+  const [autoScroll, setAutoScroll] = useState(true)
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false)
+  const notificationsRef = useRef(false)
+  const [errorFlash, setErrorFlash] = useState(null)
+  const traceListEndRef = useRef(null)
+  const [traceArrivalLog, setTraceArrivalLog] = useState([])
+
   // Tick every 5s to re-render elapsed times
   useEffect(() => {
     const id = setInterval(() => setElapsedTick(t => t + 1), 5000)
@@ -806,6 +815,7 @@ export default function LiveMonitorPage() {
             const tid = msg.trace_id
             setTraces(prev => {
               if (prev[tid]) return prev
+              setTraceArrivalLog(log => [...log.slice(-200), { ts: Date.now(), tid }])
               return {
                 ...prev,
                 [tid]: {
@@ -833,13 +843,24 @@ export default function LiveMonitorPage() {
           }
 
           if (msg.type === 'trace_finalized' && msg.trace_id) {
+            const finalStatus = msg.status || 'ok'
             setTraces(prev => {
               if (!prev[msg.trace_id]) return prev
               return {
                 ...prev,
-                [msg.trace_id]: { ...prev[msg.trace_id], status: msg.status || 'ok' },
+                [msg.trace_id]: { ...prev[msg.trace_id], status: finalStatus },
               }
             })
+            if (finalStatus === 'error') {
+              setErrorFlash(msg.trace_id)
+              setTimeout(() => setErrorFlash(null), 3000)
+              if (notificationsRef.current && 'Notification' in window && Notification.permission === 'granted') {
+                new Notification('Cluco: Trace Error', {
+                  body: `Trace ${msg.trace_id.slice(0, 12)}… finished with error`,
+                  icon: '/favicon.ico',
+                })
+              }
+            }
           }
         } catch (_e) { /* ignore */ }
       }
@@ -873,10 +894,79 @@ export default function LiveMonitorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [traces, elapsedTick])
 
-  const handleClear = () => { setTraces({}); setSpanMap({}); setExpandedTraceId(null) }
+  // Auto-scroll to bottom when new traces arrive
+  useEffect(() => {
+    if (autoScroll && traceListEndRef.current) {
+      traceListEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [traces, autoScroll])
+
+  const handleClear = () => { setTraces({}); setSpanMap({}); setExpandedTraceId(null); setTraceArrivalLog([]) }
 
   const totalTraces = running.length + completed.length
   const totalSpans = Object.values(spanMap).reduce((s, arr) => s + arr.length, 0)
+
+  // ── Computed Stats ──
+  const liveStats = useMemo(() => {
+    const all = Object.values(traces)
+    const runningCount = all.filter(t => t.status === 'running').length
+    const completedCount = all.filter(t => t.status !== 'running' && t.status !== 'error').length
+    const errorCount = all.filter(t => t.status === 'error').length
+    const total = all.length
+
+    const completedTraces = all.filter(t => t.status !== 'running')
+    const latencies = completedTraces
+      .map(t => t.latency_ms || t.duration_ms || 0)
+      .filter(l => l > 0)
+    const avgLatency = latencies.length > 0
+      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
+      : 0
+
+    const totalTokens = all.reduce((sum, t) => sum + (t.total_tokens || 0), 0)
+    const totalCost = all.reduce((sum, t) => sum + (t.total_cost_usd || 0), 0)
+    const errorRate = total > 0 ? (errorCount / total) * 100 : 0
+
+    return { runningCount, completedCount, errorCount, total, avgLatency, totalTokens, totalCost, errorRate }
+  }, [traces])
+
+  // ── Sparkline Data (trace arrivals per 30s bucket over last 5 minutes) ──
+  const sparklineData = useMemo(() => {
+    const now = Date.now()
+    const windowMs = 5 * 60 * 1000
+    const bucketMs = 30_000
+    const bucketCount = windowMs / bucketMs
+    const buckets = Array.from({ length: bucketCount }, (_, i) => ({
+      time: now - (bucketCount - 1 - i) * bucketMs,
+      count: 0,
+    }))
+
+    for (const entry of traceArrivalLog) {
+      const age = now - entry.ts
+      if (age > windowMs) continue
+      const bucketIdx = Math.floor((bucketCount - 1) - age / bucketMs)
+      if (bucketIdx >= 0 && bucketIdx < bucketCount) {
+        buckets[bucketIdx].count++
+      }
+    }
+
+    return buckets.map(b => ({
+      label: new Date(b.time).toLocaleTimeString([], { minute: '2-digit', second: '2-digit' }),
+      traces: b.count,
+    }))
+  }, [traceArrivalLog, elapsedTick])
+
+  useEffect(() => { notificationsRef.current = notificationsEnabled }, [notificationsEnabled])
+
+  // ── Enable browser notifications ──
+  const toggleNotifications = useCallback(() => {
+    if (!notificationsEnabled && 'Notification' in window) {
+      Notification.requestPermission().then(perm => {
+        setNotificationsEnabled(perm === 'granted')
+      })
+    } else {
+      setNotificationsEnabled(prev => !prev)
+    }
+  }, [notificationsEnabled])
 
   return (
     <div className="animate-fade-in">
@@ -926,6 +1016,34 @@ export default function LiveMonitorPage() {
           )}
 
           <div className="flex items-center gap-2 ml-auto">
+            {monitoring && (
+              <>
+                <button
+                  onClick={toggleNotifications}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                    notificationsEnabled
+                      ? 'text-brand-600 bg-brand-50 border-brand-200 hover:bg-brand-100'
+                      : 'text-slate-500 bg-white border-slate-200 hover:bg-slate-50'
+                  }`}
+                  title={notificationsEnabled ? 'Disable error notifications' : 'Enable browser notifications on errors'}
+                >
+                  {notificationsEnabled ? <Bell size={12} /> : <BellOff size={12} />}
+                  {notificationsEnabled ? 'Alerts On' : 'Alerts'}
+                </button>
+                <button
+                  onClick={() => setAutoScroll(prev => !prev)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                    autoScroll
+                      ? 'text-brand-600 bg-brand-50 border-brand-200 hover:bg-brand-100'
+                      : 'text-slate-500 bg-white border-slate-200 hover:bg-slate-50'
+                  }`}
+                  title={autoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll'}
+                >
+                  {autoScroll ? <ArrowDownToLine size={12} /> : <Pause size={12} />}
+                  {autoScroll ? 'Auto-scroll' : 'Paused'}
+                </button>
+              </>
+            )}
             {totalTraces > 0 && (
               <button onClick={handleClear} className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors">
                 <Trash2 size={12} /> Clear
@@ -970,6 +1088,79 @@ export default function LiveMonitorPage() {
           <div className="mt-3 px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-xs text-red-600">{errorMsg}</div>
         )}
       </div>
+
+      {/* ── Error Flash Banner ── */}
+      {errorFlash && (
+        <div className="mb-4 px-4 py-3 rounded-xl bg-red-50 border border-red-200 flex items-center gap-3 animate-pulse">
+          <AlertTriangle size={16} className="text-red-500 flex-shrink-0" />
+          <span className="text-sm text-red-700 font-medium">
+            Trace <code className="font-mono text-xs bg-red-100 px-1.5 py-0.5 rounded">{errorFlash.slice(0, 16)}…</code> finished with an error
+          </span>
+        </div>
+      )}
+
+      {/* ── Real-Time Stats Bar ── */}
+      {monitoring && totalTraces > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 mb-5">
+          <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">Total</div>
+            <div className="text-xl font-bold text-slate-800">{liveStats.total}</div>
+          </div>
+          <div className="rounded-xl border border-green-200 bg-green-50 p-3.5 shadow-sm">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-green-500 mb-1 flex items-center gap-1"><Activity size={10} /> Running</div>
+            <div className="text-xl font-bold text-green-700">{liveStats.runningCount}</div>
+          </div>
+          <div className="rounded-xl border border-blue-200 bg-blue-50 p-3.5 shadow-sm">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-blue-500 mb-1 flex items-center gap-1"><CheckCircle size={10} /> Completed</div>
+            <div className="text-xl font-bold text-blue-700">{liveStats.completedCount}</div>
+          </div>
+          <div className={`rounded-xl border p-3.5 shadow-sm ${liveStats.errorCount > 0 ? 'border-red-200 bg-red-50' : 'border-slate-200 bg-white'}`}>
+            <div className={`text-[10px] font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${liveStats.errorCount > 0 ? 'text-red-500' : 'text-slate-400'}`}><XCircle size={10} /> Errors</div>
+            <div className={`text-xl font-bold ${liveStats.errorCount > 0 ? 'text-red-600' : 'text-slate-500'}`}>{liveStats.errorCount}</div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1"><Clock size={10} /> Avg Latency</div>
+            <div className="text-xl font-bold text-slate-800">{liveStats.avgLatency > 0 ? `${(liveStats.avgLatency / 1000).toFixed(1)}s` : '—'}</div>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1"><Zap size={10} /> Tokens</div>
+            <div className="text-xl font-bold text-slate-800">{fmtTokens(liveStats.totalTokens)}</div>
+          </div>
+          <div className={`rounded-xl border p-3.5 shadow-sm ${liveStats.errorRate > 10 ? 'border-red-200 bg-red-50' : liveStats.errorRate > 0 ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white'}`}>
+            <div className={`text-[10px] font-bold uppercase tracking-wider mb-1 flex items-center gap-1 ${liveStats.errorRate > 10 ? 'text-red-500' : liveStats.errorRate > 0 ? 'text-amber-500' : 'text-slate-400'}`}><AlertTriangle size={10} /> Error Rate</div>
+            <div className={`text-xl font-bold ${liveStats.errorRate > 10 ? 'text-red-600' : liveStats.errorRate > 0 ? 'text-amber-600' : 'text-slate-500'}`}>{liveStats.errorRate.toFixed(1)}%</div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Trace Arrival Sparkline ── */}
+      {monitoring && traceArrivalLog.length > 0 && (
+        <div className="card p-4 mb-5">
+          <div className="flex items-center gap-2 mb-2">
+            <TrendingUp size={14} className="text-brand-500" />
+            <span className="text-xs font-semibold text-slate-600">Trace Arrival Rate</span>
+            <span className="text-[10px] text-slate-400">(last 5 min, 30s buckets)</span>
+          </div>
+          <div className="h-16">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={sparklineData} margin={{ top: 2, right: 4, bottom: 0, left: 4 }}>
+                <defs>
+                  <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#6366f1" stopOpacity={0.3} />
+                    <stop offset="100%" stopColor="#6366f1" stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <RechartsTooltip
+                  contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #e2e8f0', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}
+                  formatter={(v) => [`${v} traces`, 'Arrivals']}
+                  labelFormatter={(l) => l}
+                />
+                <Area type="monotone" dataKey="traces" stroke="#6366f1" strokeWidth={1.5} fill="url(#sparkGrad)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
 
       {/* ── Aggregate Judge Stats ── */}
       {monitoring && totalTraces > 0 && (() => {
@@ -1073,6 +1264,8 @@ export default function LiveMonitorPage() {
           }
         />
       )}
+
+      <div ref={traceListEndRef} />
     </div>
   )
 }
