@@ -790,6 +790,23 @@ function HistoryTab() {
     } finally { setResending(null) }
   }
 
+  const handleRetryAllFailed = async () => {
+    const failedAlerts = alerts.filter(a => a.email_status === 'failed' && a._id)
+    if (!failedAlerts.length) return
+    setResending('all')
+    setResendResult(null)
+    let succeeded = 0, errors = 0
+    for (const a of failedAlerts) {
+      try {
+        const r = await sendAlertEmail(a._id)
+        if (r.data.ok) succeeded++; else errors++
+      } catch { errors++ }
+    }
+    setResendResult({ id: 'all', ok: errors === 0, error: errors > 0 ? `${succeeded} sent, ${errors} failed` : `All ${succeeded} emails resent successfully` })
+    setResending(null)
+    load()
+  }
+
   const statusBadge = (status) => {
     if (status === 'sent') return (
       <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
@@ -819,7 +836,19 @@ function HistoryTab() {
         <div className="flex items-center gap-4">
           <p className="text-xs text-slate-500">{alerts.length} email alert{alerts.length !== 1 ? 's' : ''}</p>
           {sentCount > 0 && <span className="text-xs text-green-600 flex items-center gap-1"><CheckCircle size={11} /> {sentCount} sent</span>}
-          {failedCount > 0 && <span className="text-xs text-red-600 flex items-center gap-1"><XCircle size={11} /> {failedCount} failed</span>}
+          {failedCount > 0 && (
+            <span className="flex items-center gap-2">
+              <span className="text-xs text-red-600 flex items-center gap-1"><XCircle size={11} /> {failedCount} failed</span>
+              <button
+                onClick={handleRetryAllFailed}
+                disabled={resending === 'all'}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors disabled:opacity-50"
+              >
+                {resending === 'all' ? <RefreshCw size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                Retry All Failed
+              </button>
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <label className="text-xs text-slate-400">Period:</label>
@@ -898,7 +927,7 @@ function HistoryTab() {
                         {a.created_at ? new Date(a.created_at).toLocaleString() : '-'}
                       </td>
                       <td className="text-center">
-                        <div className="flex items-center justify-center gap-1">
+                        <div className="flex items-center justify-center gap-1.5">
                           <button
                             onClick={(e) => { e.stopPropagation(); setExpandedId(isExpanded ? null : (a._id || i)) }}
                             className="p-1 text-slate-400 hover:text-brand-600 transition-colors"
@@ -906,14 +935,25 @@ function HistoryTab() {
                           >
                             <Eye size={14} />
                           </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleResend(a._id) }}
-                            disabled={resending === a._id}
-                            className="p-1 text-slate-400 hover:text-green-600 transition-colors disabled:opacity-40"
-                            title="Resend Email"
-                          >
-                            {resending === a._id ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} />}
-                          </button>
+                          {a.email_status === 'failed' ? (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleResend(a._id) }}
+                              disabled={resending === a._id}
+                              className="flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-50 text-red-700 border border-red-200 hover:bg-red-100 transition-colors disabled:opacity-50"
+                            >
+                              {resending === a._id ? <RefreshCw size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                              Retry
+                            </button>
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleResend(a._id) }}
+                              disabled={resending === a._id}
+                              className="p-1 text-slate-400 hover:text-green-600 transition-colors disabled:opacity-40"
+                              title="Resend Email"
+                            >
+                              {resending === a._id ? <RefreshCw size={14} className="animate-spin" /> : <Send size={14} />}
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

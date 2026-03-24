@@ -344,7 +344,8 @@ def _extract_metric(metric: str, trace_data: dict):
 
 
 def dispatch_alert_emails(trace_data: dict, triggered_rules: list):
-    """For each triggered rule, send emails to configured recipients."""
+    """For each triggered rule, send emails to configured recipients.
+    Always stores an alert record regardless of send success/failure."""
     if not triggered_rules:
         return
 
@@ -352,51 +353,77 @@ def dispatch_alert_emails(trace_data: dict, triggered_rules: list):
         from app.storage.mongodb import _get_db
         db = _get_db()
     except Exception:
+        logger.error("[dispatch] Cannot connect to MongoDB — alert records will not be stored")
         return
 
     for rule in triggered_rules:
-        recipient_ids = rule.get("recipient_ids", [])
-        if not recipient_ids:
-            # Fall back to all active recipients
-            recipients = list(db["email_recipients"].find({"active": True}))
-        else:
-            from bson import ObjectId
-            recipients = list(db["email_recipients"].find({
-                "_id": {"$in": [ObjectId(rid) for rid in recipient_ids if rid]},
-                "active": True,
-            }))
+        to_emails = []
+        subject = ""
+        html = ""
+        text = ""
+        email_status = "failed"
+        email_error = ""
+        alert_data = None
 
-        if not recipients:
-            continue
+        try:
+            # Build alert data first so it's available for storage even if sending fails
+            cond = rule.get("condition", {})
+            metric = cond.get("metric", "")
+            if metric == "evaluator_result":
+                details = {
+                    "Rule": rule.get("name", ""),
+                    "Evaluator": cond.get("evaluator_name", ""),
+                    "Result": "Fail" if cond.get("expected_value") == "False" else "Pass",
+                    "Trace ID": trace_data.get("trace_id", ""),
+                    "Product": trace_data.get("product_id", ""),
+                }
+            else:
+                details = {
+                    "Rule": rule.get("name", ""),
+                    "Metric": metric,
+                    "Threshold": str(cond.get("threshold", "")),
+                    "Actual Value": str(_extract_metric(metric, trace_data)),
+                    "Product": trace_data.get("product_id", ""),
+                }
+            alert_data = {
+                "alert_type": rule.get("alert_type", "rule_triggered"),
+                "severity": rule.get("severity", "warning"),
+                "trace_id": trace_data.get("trace_id", ""),
+                "message": _build_rule_message(rule, trace_data),
+                "details": details,
+            }
 
-        to_emails = [r["email"] for r in recipients if r.get("email")]
-        if not to_emails:
-            continue
+            subject, html, text = _build_alert_email(alert_data, rule)
 
-        # Build alert data
-        alert_data = {
-            "alert_type": rule.get("alert_type", "rule_triggered"),
-            "severity": rule.get("severity", "warning"),
-            "trace_id": trace_data.get("trace_id", ""),
-            "message": _build_rule_message(rule, trace_data),
-            "details": {
-                "Rule": rule.get("name", ""),
-                "Metric": rule.get("condition", {}).get("metric", ""),
-                "Threshold": str(rule.get("condition", {}).get("threshold", "")),
-                "Actual Value": str(_extract_metric(
-                    rule.get("condition", {}).get("metric", ""),
-                    trace_data
-                )),
-                "Product": trace_data.get("product_id", ""),
-            },
-        }
+            # Resolve recipients
+            recipient_ids = rule.get("recipient_ids", [])
+            if not recipient_ids:
+                recipients = list(db["email_recipients"].find({"active": True}))
+            else:
+                from bson import ObjectId
+                recipients = list(db["email_recipients"].find({
+                    "_id": {"$in": [ObjectId(rid) for rid in recipient_ids if rid]},
+                    "active": True,
+                }))
 
-        subject, html, text = _build_alert_email(alert_data, rule)
-        send_result = send_email(to_emails, subject, html, text)
+            to_emails = [r["email"] for r in recipients if r.get("email")]
 
-        email_status = "sent" if send_result.get("ok") else "failed"
-        email_error = send_result.get("error", "") if not send_result.get("ok") else ""
+            if not to_emails:
+                email_error = "No active email recipients configured"
+                logger.warning("[dispatch] Rule '%s' triggered but no recipients found", rule.get("name"))
+            else:
+                send_result = send_email(to_emails, subject, html, text)
+                if send_result.get("ok"):
+                    email_status = "sent"
+                    email_error = ""
+                else:
+                    email_error = send_result.get("error", "Unknown send failure")
 
+        except Exception as exc:
+            logger.error("[dispatch] Error processing rule '%s': %s", rule.get("name"), exc, exc_info=True)
+            email_error = str(exc)
+
+        # Always store the alert record
         try:
             from app.storage import get_trace_store
             store = get_trace_store()
@@ -405,11 +432,11 @@ def dispatch_alert_emails(trace_data: dict, triggered_rules: list):
                 "product_id": trace_data.get("product_id", "default"),
                 "alert_type": rule.get("alert_type", "rule_triggered"),
                 "severity": rule.get("severity", "warning"),
-                "message": alert_data["message"],
+                "message": alert_data["message"] if alert_data else rule.get("name", "Alert triggered"),
                 "details": {
                     "rule_name": rule.get("name", ""),
                     "email_sent_to": to_emails,
-                    **alert_data["details"],
+                    **(alert_data["details"] if alert_data else {}),
                 },
                 "email_subject": subject,
                 "email_body_html": html,
@@ -419,7 +446,7 @@ def dispatch_alert_emails(trace_data: dict, triggered_rules: list):
                 "email_recipients": to_emails,
             })
         except Exception as e:
-            logger.debug("Could not store alert record: %s", e)
+            logger.error("[dispatch] Could not store alert record: %s", e)
 
 
 def _build_rule_message(rule: dict, trace_data: dict) -> str:
@@ -427,6 +454,12 @@ def _build_rule_message(rule: dict, trace_data: dict) -> str:
     name = rule.get("name", "Alert Rule")
     cond = rule.get("condition", {})
     metric = cond.get("metric", "metric")
+
+    if metric == "evaluator_result":
+        evaluator_name = cond.get("evaluator_name", "evaluator")
+        expected = "Fail" if cond.get("expected_value") == "False" else "Pass"
+        return f"{name}: {evaluator_name} returned {expected} on trace {trace_data.get('trace_id', 'N/A')[:12]}"
+
     operator = cond.get("operator", "gt")
     threshold = cond.get("threshold", 0)
     actual = _extract_metric(metric, trace_data)
