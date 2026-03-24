@@ -1006,6 +1006,7 @@ def run_all_strategies_optimization(
             entry["failed"] = result.get("failed")
             entry["total"] = result.get("total")
             entry["item_results"] = result.get("item_results", [])
+            entry["prompt_text"] = result.get("prompt_text", "")
 
             if entry["status"] == "done" and entry["pass_rate"] > best_overall_rate:
                 best_overall_rate = entry["pass_rate"]
@@ -1028,29 +1029,7 @@ def run_all_strategies_optimization(
             "best_pass_rate": best_overall_rate,
         })
 
-    # --- Save the winning prompt as a new version ---
-    version_number = None
-    if best_overall_strategy != "baseline" and best_overall_rate > baseline_pass_rate:
-        ver_result = store.create_prompt_version(
-            prompt_id=prompt_id,
-            content=best_overall_prompt,
-            tags=[
-                f"auto-optimize-{run_id}",
-                f"strategy-{best_overall_strategy}",
-                f"pass_rate-{best_overall_rate}",
-            ],
-        )
-        version_number = ver_result.get("version_number") if ver_result else None
-        logger.info("Auto-best: saved winning prompt as v%s (strategy=%s, rate=%.1f%%)",
-                     version_number, best_overall_strategy, best_overall_rate)
-
-    # Create experiment record for winning strategy
-    if best_overall_strategy != "baseline":
-        final_eval = _evaluate_candidate(best_overall_prompt, eval_items, primary_evaluator, store, target_model)
-        _create_experiment_record(
-            store, run_id, 1, prompt_id, dataset_id, all_evaluator_ids,
-            primary_evaluator, final_eval, prompt, experiments_created,
-        )
+    # No auto-save: the user picks which strategy prompt to save from the UI
 
     uplift = round(best_overall_rate - baseline_pass_rate, 1)
 
@@ -1067,8 +1046,7 @@ def run_all_strategies_optimization(
         "initial_pass_rate": baseline_pass_rate,
         "final_pass_rate": best_overall_rate,
         "uplift": uplift,
-        "new_version": version_number,
-        "experiments": experiments_created,
+        "experiments": [],
         "completed_at": datetime.utcnow().isoformat(),
         "status": "completed",
     }

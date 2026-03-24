@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getPromptTemplates, getPromptTemplate, getPromptTemplateVersions, getPromptVersionDetail, createPromptTemplate, createPromptVersion, comparePromptVersions, optimizePrompt, getOptimizationRun, getDatasets, getEvaluators, getPromptVersions, getProducts, getPipelines, testPromptOnDataset } from '../api'
-import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash, AlertTriangle, CheckCircle, XCircle, Trophy, Play, ChevronDown, ChevronUp, Eye } from 'lucide-react'
+import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash, AlertTriangle, CheckCircle, XCircle, Trophy, Play, ChevronDown, ChevronUp, Eye, Save, Copy, Check } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import FilterBar, { FilterSelect } from '../components/ui/FilterBar'
 import MarkdownRenderer from '../components/MarkdownRenderer'
@@ -48,6 +48,10 @@ export default function PromptRegistryPage() {
   const [testVersionNum, setTestVersionNum] = useState(null)
   const [testRunning, setTestRunning] = useState(false)
   const [testResult, setTestResult] = useState(null)
+  const [viewPromptStrategy, setViewPromptStrategy] = useState(null)
+  const [savingStrategy, setSavingStrategy] = useState(null)
+  const [savedVersions, setSavedVersions] = useState({})
+  const [copiedStrategy, setCopiedStrategy] = useState(null)
 
   useEffect(() => {
     Promise.all([
@@ -177,9 +181,39 @@ export default function PromptRegistryPage() {
     setTestRunning(false)
   }
 
+  const handleSaveStrategyPrompt = async (strategy) => {
+    if (!strategy.prompt_text || !selectedPrompt) return
+    setSavingStrategy(strategy.strategy)
+    try {
+      const res = await createPromptVersion(selectedPrompt.prompt_id, {
+        content: strategy.prompt_text,
+        tags: [
+          `optimized-${strategy.strategy}`,
+          `pass_rate-${strategy.pass_rate}%`,
+          strategy.type === 'dspy' ? 'dspy' : 'custom',
+        ],
+      })
+      const vn = res.data?.version_number || res.data?.version?.version_number || '?'
+      setSavedVersions(prev => ({ ...prev, [strategy.strategy]: vn }))
+      selectPrompt(selectedPrompt.prompt_id)
+      loadTemplates()
+    } catch { /* ignore */ }
+    setSavingStrategy(null)
+  }
+
+  const handleCopyPrompt = (strategy) => {
+    if (!strategy.prompt_text) return
+    navigator.clipboard.writeText(strategy.prompt_text)
+    setCopiedStrategy(strategy.strategy)
+    setTimeout(() => setCopiedStrategy(null), 2000)
+  }
+
   const openOptimizeWizard = async () => {
     setShowOptimize(true)
     setOptimizeResult(null)
+    setViewPromptStrategy(null)
+    setSavedVersions({})
+    setCopiedStrategy(null)
     try {
       const [dsRes, evRes] = await Promise.all([getDatasets(), getEvaluators()])
       setAvailableDatasets(dsRes.data?.datasets || [])
@@ -465,9 +499,7 @@ export default function PromptRegistryPage() {
                           <div className="flex items-center gap-2 p-2.5 bg-amber-50 rounded-lg border border-amber-200 text-xs">
                             <Trophy size={14} className="text-amber-500" />
                             <span className="font-semibold text-amber-700">Winning strategy: {optimizeResult.best_strategy.replace(/_/g, ' ')}</span>
-                            {optimizeResult.new_version && (
-                              <span className="px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded text-2xs ml-auto">Saved as v{optimizeResult.new_version}</span>
-                            )}
+                            <span className="text-amber-600 ml-auto text-2xs">Select a strategy below to save its prompt</span>
                           </div>
                         )}
 
@@ -534,6 +566,9 @@ export default function PromptRegistryPage() {
                               {s.changes_summary && (
                                 <span className="text-slate-400 truncate max-w-[150px]">{s.changes_summary}</span>
                               )}
+                              {savedVersions[s.strategy] && (
+                                <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 rounded text-2xs font-semibold">v{savedVersions[s.strategy]}</span>
+                              )}
                               {s.status === 'done' && s.pass_rate != null && (
                                 <span className={`ml-auto font-bold ${s.is_best ? 'text-emerald-600' : 'text-slate-600'}`}>{s.pass_rate}%</span>
                               )}
@@ -548,6 +583,38 @@ export default function PromptRegistryPage() {
                                     <span className="font-semibold">Changes:</span> {s.changes_summary}
                                   </div>
                                 )}
+
+                                {/* Prompt actions: View / Copy / Save */}
+                                {s.prompt_text && (
+                                  <div className="px-3 py-2 border-b border-slate-100">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      <button onClick={() => setViewPromptStrategy(viewPromptStrategy === s.strategy ? null : s.strategy)}
+                                        className="flex items-center gap-1 px-2 py-1 rounded text-2xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-600">
+                                        <Eye size={11} /> {viewPromptStrategy === s.strategy ? 'Hide Prompt' : 'View Prompt'}
+                                      </button>
+                                      <button onClick={() => handleCopyPrompt(s)}
+                                        className="flex items-center gap-1 px-2 py-1 rounded text-2xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-600">
+                                        {copiedStrategy === s.strategy ? <><Check size={11} className="text-emerald-500" /> Copied</> : <><Copy size={11} /> Copy</>}
+                                      </button>
+                                      {savedVersions[s.strategy] ? (
+                                        <span className="flex items-center gap-1 px-2 py-1 rounded text-2xs font-semibold bg-emerald-100 text-emerald-700">
+                                          <CheckCircle size={11} /> Saved as v{savedVersions[s.strategy]}
+                                        </span>
+                                      ) : (
+                                        <button onClick={() => handleSaveStrategyPrompt(s)}
+                                          disabled={savingStrategy === s.strategy}
+                                          className="flex items-center gap-1 px-2 py-1 rounded text-2xs font-medium bg-violet-100 hover:bg-violet-200 text-violet-700 disabled:opacity-50">
+                                          {savingStrategy === s.strategy ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+                                          {savingStrategy === s.strategy ? 'Saving...' : 'Save as New Version'}
+                                        </button>
+                                      )}
+                                    </div>
+                                    {viewPromptStrategy === s.strategy && (
+                                      <pre className="mt-2 p-3 bg-slate-900 text-slate-100 text-2xs rounded-lg max-h-48 overflow-auto whitespace-pre-wrap font-mono leading-relaxed">{s.prompt_text}</pre>
+                                    )}
+                                  </div>
+                                )}
+
                                 {s.item_results?.length > 0 ? (
                                   <div className="max-h-60 overflow-auto">
                                     <table className="w-full text-2xs">
