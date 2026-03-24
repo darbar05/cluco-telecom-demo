@@ -1928,6 +1928,15 @@ def trigger_evaluation_run(body: dict = Body(...)) -> dict:
         product_id=product_id,
         evaluator_configs=evaluator_configs,
     )
+
+    if trace_id and result.get("status") == "completed":
+        try:
+            trace_doc = store.get(trace_id)
+            if trace_doc:
+                _evaluate_alert_rules_for_trace(store, trace_id, trace_doc)
+        except Exception:
+            pass
+
     return result
 
 
@@ -1953,6 +1962,19 @@ def trigger_conversation_evaluation(body: dict = Body(...)) -> dict:
         evaluator_configs=evaluator_configs,
         product_id=product_id,
     )
+
+    if result.get("status") == "completed":
+        try:
+            traces = list(store._traces.find({"session_id": session_id}, {"trace_id": 1}).limit(200))
+            for t in traces:
+                tid = t.get("trace_id")
+                if tid:
+                    trace_doc = store.get(tid)
+                    if trace_doc:
+                        _evaluate_alert_rules_for_trace(store, tid, trace_doc)
+        except Exception:
+            pass
+
     return result
 
 

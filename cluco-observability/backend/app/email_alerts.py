@@ -258,7 +258,7 @@ def evaluate_rules_for_trace(trace_data: dict) -> list:
             from bson import ObjectId
             db["alert_rules"].update_one(
                 {"_id": ObjectId(rule["_id"]) if isinstance(rule["_id"], str) else rule["_id"]},
-                {"$set": {"last_triggered_at": now}},
+                {"$set": {"last_triggered_at": now}, "$inc": {"trigger_count": 1}},
             )
         except Exception as e:
             logger.debug("Could not update last_triggered_at for rule %s: %s", rule.get("name"), e)

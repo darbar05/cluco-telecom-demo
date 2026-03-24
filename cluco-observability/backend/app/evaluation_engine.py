@@ -1852,6 +1852,47 @@ def run_single_evaluator(evaluator_doc: dict, ctx: TraceContext,
 
 
 # ---------------------------------------------------------------------------
+# Alert-rule helper (used by all evaluation paths below)
+# ---------------------------------------------------------------------------
+
+def _persist_feedback_and_alerts(store, trace_id: str, evaluator_name: str, result_dict: dict):
+    """Write feedback for an evaluator result and return whether it was persisted."""
+    try:
+        store.add_feedback(
+            trace_id=trace_id,
+            key=evaluator_name,
+            score=result_dict.get("score"),
+            value="True" if result_dict.get("passed", result_dict.get("score", 0) >= 50) else "False",
+            comment=result_dict.get("reasoning", ""),
+            source="judge",
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Failed to persist feedback for trace %s / %s: %s", trace_id, evaluator_name, exc)
+        return False
+
+
+def _trigger_alert_rules(store, trace_id: str):
+    """Evaluate email-alert rules for a trace after feedback has been written."""
+    try:
+        from app.email_alerts import evaluate_rules_for_trace, dispatch_alert_emails
+        import threading
+        trace_doc = store.get(trace_id)
+        if not trace_doc:
+            return
+        triggered = evaluate_rules_for_trace(trace_doc)
+        if triggered:
+            threading.Thread(
+                target=dispatch_alert_emails,
+                args=(trace_doc, triggered),
+                daemon=True,
+                name="email-rule-eval",
+            ).start()
+    except Exception as exc:
+        logger.warning("Alert rule evaluation failed for trace %s: %s", trace_id, exc)
+
+
+# ---------------------------------------------------------------------------
 # Evaluation Runner (orchestrator)
 # ---------------------------------------------------------------------------
 
@@ -1971,12 +2012,15 @@ def run_evaluation(
             results = []
             for ev in evaluators:
                 r = ev.evaluate(ctx)
-                results.append(r.to_dict())
+                rd = r.to_dict()
+                results.append(rd)
+                _persist_feedback_and_alerts(store, trace_id, ev.name, rd)
 
             run_doc["results"] = results
             scores = [r["score"] for r in results if isinstance(r.get("score"), (int, float))]
             run_doc["aggregate_score"] = round(sum(scores) / len(scores), 1) if scores else 0
             run_doc["aggregate_passed"] = all(r.get("passed", False) for r in results)
+            _trigger_alert_rules(store, trace_id)
 
         # Mode: evaluate against dataset
         elif dataset_id:
@@ -1990,6 +2034,7 @@ def run_evaluation(
             items = dataset.get("items", [])
             item_results = []
             all_scores = []
+            alerted_trace_ids = set()
 
             # If trace_id is also provided, evaluate that trace against each ground truth
             trace = None
@@ -2034,12 +2079,21 @@ def run_evaluation(
                             final_output=str(actual),
                         )
 
+                real_tid = ctx.trace_id if ctx.trace_id != "dataset_item" else None
                 item_res = {"item_id": item.get("item_id", ""), "results": []}
                 for ev in evaluators:
                     r = ev.evaluate(ctx, ground_truth=gt)
-                    item_res["results"].append(r.to_dict())
+                    rd = r.to_dict()
+                    item_res["results"].append(rd)
                     all_scores.append(r.score)
+                    if real_tid:
+                        _persist_feedback_and_alerts(store, real_tid, ev.name, rd)
+                if real_tid:
+                    alerted_trace_ids.add(real_tid)
                 item_results.append(item_res)
+
+            for tid in alerted_trace_ids:
+                _trigger_alert_rules(store, tid)
 
             run_doc["item_results"] = item_results
 
@@ -2207,6 +2261,7 @@ def run_conversation_evaluation(
             results.append(rd)
             conversation_results.append(rd)
 
+        conv_alerted_tids = set()
         for i, turn_ctx in enumerate(conv_ctx.turns):
             turn_results_list = []
             for doc in per_turn_evaluators:
@@ -2217,12 +2272,19 @@ def run_conversation_evaluation(
                 rd = r.to_dict()
                 rd["evaluator_type"] = "per_turn"
                 turn_results_list.append(rd)
+                if turn_ctx.trace_id:
+                    _persist_feedback_and_alerts(store, turn_ctx.trace_id, name, rd)
+            if turn_ctx.trace_id:
+                conv_alerted_tids.add(turn_ctx.trace_id)
             per_turn_results.append({
                 "turn": i + 1,
                 "trace_id": turn_ctx.trace_id,
                 "results": turn_results_list,
             })
             results.extend(turn_results_list)
+
+        for tid in conv_alerted_tids:
+            _trigger_alert_rules(store, tid)
 
         run_doc["results"] = results
         run_doc["conversation_results"] = conversation_results
