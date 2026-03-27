@@ -3085,6 +3085,20 @@ class CreatePromptVersionPayload(BaseModel):
     model: Optional[str] = ""
 
 
+class UpdatePromptTemplatePayload(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    agent_name: Optional[str] = None
+    product_id: Optional[str] = None
+
+
+class UpdatePromptVersionPayload(BaseModel):
+    content: Optional[str] = None
+    tags: Optional[list[str]] = None
+    variables: Optional[list[str]] = None
+    model: Optional[str] = None
+
+
 @router.post("/prompts")
 def create_prompt(payload: CreatePromptPayload) -> dict:
     import uuid
@@ -3181,6 +3195,56 @@ def compare_prompt_versions_endpoint(
     from app.storage import get_trace_store
     store = get_trace_store()
     return store.compare_prompt_versions(prompt_id, version_a, version_b)
+
+
+@router.patch("/prompts/{prompt_id}")
+def update_prompt_template_endpoint(prompt_id: str, payload: UpdatePromptTemplatePayload) -> dict:
+    from app.storage import get_trace_store
+    store = get_trace_store()
+    result = store.update_prompt_template(
+        prompt_id,
+        name=payload.name, description=payload.description,
+        agent_name=payload.agent_name, product_id=payload.product_id,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    return result
+
+
+@router.delete("/prompts/{prompt_id}")
+def delete_prompt_template_endpoint(prompt_id: str) -> dict:
+    from app.storage import get_trace_store
+    store = get_trace_store()
+    result = store.delete_prompt_template(prompt_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail="Prompt not found or already deleted")
+    return result
+
+
+@router.patch("/prompts/{prompt_id}/versions/{version}")
+def update_prompt_version_endpoint(prompt_id: str, version: int, payload: UpdatePromptVersionPayload) -> dict:
+    from app.storage import get_trace_store
+    store = get_trace_store()
+    result = store.update_prompt_version(
+        prompt_id, version,
+        content=payload.content, tags=payload.tags,
+        variables=payload.variables, model=payload.model,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return result
+
+
+@router.delete("/prompts/{prompt_id}/versions/{version}")
+def delete_prompt_version_endpoint(prompt_id: str, version: int) -> dict:
+    from app.storage import get_trace_store
+    store = get_trace_store()
+    result = store.delete_prompt_version(prompt_id, version)
+    if not result.get("ok"):
+        error = result.get("error", "Version not found")
+        status = 400 if "only version" in error.lower() else 404
+        raise HTTPException(status_code=status, detail=error)
+    return result
 
 
 @router.post("/prompts/{prompt_id}/optimize")

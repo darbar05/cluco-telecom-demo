@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getPromptTemplates, getPromptTemplate, getPromptTemplateVersions, getPromptVersionDetail, createPromptTemplate, createPromptVersion, comparePromptVersions, optimizePrompt, getOptimizationRun, getDatasets, getEvaluators, getPromptVersions, getProducts, getPipelines, testPromptOnDataset } from '../api'
-import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash, AlertTriangle, CheckCircle, XCircle, Trophy, Play, ChevronDown, ChevronUp, Eye, Save, Copy, Check } from 'lucide-react'
+import { getPromptTemplates, getPromptTemplate, getPromptTemplateVersions, getPromptVersionDetail, createPromptTemplate, createPromptVersion, comparePromptVersions, optimizePrompt, getOptimizationRun, getDatasets, getEvaluators, getPromptVersions, getProducts, getPipelines, testPromptOnDataset, updatePromptTemplate, deletePromptTemplate, updatePromptVersion, deletePromptVersion } from '../api'
+import { FileText, ArrowLeft, GitCompare, ChevronRight, Sparkles, Loader2, Radio, Clock, Hash, AlertTriangle, CheckCircle, XCircle, Trophy, Play, ChevronDown, ChevronUp, Eye, Save, Copy, Check, Pencil, Trash2 } from 'lucide-react'
 import PageHeader from '../components/ui/PageHeader'
 import FilterBar, { FilterSelect } from '../components/ui/FilterBar'
 import MarkdownRenderer from '../components/MarkdownRenderer'
@@ -52,6 +52,8 @@ export default function PromptRegistryPage() {
   const [savingStrategy, setSavingStrategy] = useState(null)
   const [savedVersions, setSavedVersions] = useState({})
   const [copiedStrategy, setCopiedStrategy] = useState(null)
+  const [editingTemplate, setEditingTemplate] = useState(null)
+  const [editingVersion, setEditingVersion] = useState(null)
 
   useEffect(() => {
     Promise.all([
@@ -108,6 +110,7 @@ export default function PromptRegistryPage() {
 
   const selectVersion = async (vNum) => {
     setSelectedVersion(vNum)
+    setEditingVersion(null)
     try {
       const res = await getPromptVersionDetail(selectedPrompt.prompt_id, vNum)
       setVersionDetail(res.data)
@@ -155,6 +158,57 @@ export default function PromptRegistryPage() {
     setSaving(false)
   }
 
+  const handleUpdateTemplate = async () => {
+    if (!editingTemplate || !selectedPrompt) return
+    setSaving(true)
+    try {
+      await updatePromptTemplate(selectedPrompt.prompt_id, editingTemplate)
+      setEditingTemplate(null)
+      const tmpl = await getPromptTemplate(selectedPrompt.prompt_id)
+      setSelectedPrompt(tmpl.data)
+      loadTemplates()
+    } catch { /* ignore */ }
+    setSaving(false)
+  }
+
+  const handleDeleteTemplate = async () => {
+    if (!selectedPrompt) return
+    if (!window.confirm(`Delete prompt "${selectedPrompt.name}" and all its versions? This cannot be undone.`)) return
+    try {
+      await deletePromptTemplate(selectedPrompt.prompt_id)
+      goBack()
+      loadTemplates()
+    } catch { /* ignore */ }
+  }
+
+  const handleUpdateVersion = async () => {
+    if (!editingVersion || !selectedPrompt || !versionDetail) return
+    setSaving(true)
+    try {
+      const payload = { content: editingVersion.content }
+      if (editingVersion.tags !== undefined) {
+        payload.tags = editingVersion.tags.split(',').map(t => t.trim()).filter(Boolean)
+      }
+      await updatePromptVersion(selectedPrompt.prompt_id, versionDetail.version_number, payload)
+      setEditingVersion(null)
+      selectPrompt(selectedPrompt.prompt_id)
+    } catch { /* ignore */ }
+    setSaving(false)
+  }
+
+  const handleDeleteVersion = async () => {
+    if (!selectedPrompt || !versionDetail) return
+    if (!window.confirm(`Delete version ${versionDetail.version_number}?`)) return
+    try {
+      await deletePromptVersion(selectedPrompt.prompt_id, versionDetail.version_number)
+      selectPrompt(selectedPrompt.prompt_id)
+      loadTemplates()
+    } catch (e) {
+      const msg = e.response?.data?.detail || e.message || 'Delete failed'
+      alert(msg)
+    }
+  }
+
   const goBack = () => {
     setSelectedPrompt(null)
     setVersions([])
@@ -162,6 +216,8 @@ export default function PromptRegistryPage() {
     setVersionDetail(null)
     setCompareMode(false)
     setCompareData(null)
+    setEditingTemplate(null)
+    setEditingVersion(null)
   }
 
   const handleTestOnDataset = async () => {
@@ -284,6 +340,14 @@ export default function PromptRegistryPage() {
             <h1 className="text-xl font-bold text-slate-800">{selectedPrompt.name}</h1>
             {selectedPrompt.description && <p className="text-sm text-slate-500">{selectedPrompt.description}</p>}
           </div>
+          <button onClick={() => setEditingTemplate({ name: selectedPrompt.name, description: selectedPrompt.description || '', agent_name: selectedPrompt.agent_name || '', product_id: selectedPrompt.product_id || '' })}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title="Edit prompt metadata">
+            <Pencil size={15} />
+          </button>
+          <button onClick={handleDeleteTemplate}
+            className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500" title="Delete prompt">
+            <Trash2 size={15} />
+          </button>
           <div className="flex-1" />
           <button onClick={() => { setCompareMode(!compareMode); setCompareData(null) }}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border ${compareMode ? 'bg-brand-50 border-brand-200 text-brand-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>
@@ -308,6 +372,41 @@ export default function PromptRegistryPage() {
           <button onClick={() => { setShowNewVersion(true); setNewContent(versionDetail?.content || '') }}
             className="btn-brand text-xs px-3 py-1.5">+ New Version</button>
         </div>
+
+        {editingTemplate && (
+          <div className="card p-5 mb-5 border-amber-200 bg-amber-50/30">
+            <div className="text-sm font-semibold text-slate-700 mb-3">Edit Prompt Metadata</div>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Name</label>
+                <input value={editingTemplate.name} onChange={e => setEditingTemplate(p => ({ ...p, name: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Description</label>
+                <input value={editingTemplate.description} onChange={e => setEditingTemplate(p => ({ ...p, description: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Agent Name</label>
+                <input value={editingTemplate.agent_name} onChange={e => setEditingTemplate(p => ({ ...p, agent_name: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Product ID</label>
+                <input value={editingTemplate.product_id} onChange={e => setEditingTemplate(p => ({ ...p, product_id: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setEditingTemplate(null)} className="px-3 py-1.5 text-sm text-slate-500">Cancel</button>
+              <button onClick={handleUpdateTemplate} disabled={saving || !editingTemplate.name?.trim()}
+                className="btn-brand text-sm px-4 py-1.5 disabled:opacity-50">
+                {saving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {showOptimize && (
           <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => !optimizing && setShowOptimize(false)}>
@@ -819,20 +918,48 @@ export default function PromptRegistryPage() {
                       <h3 className="text-sm font-semibold text-slate-700">Version {versionDetail.version_number}</h3>
                       <span className="text-xs text-slate-400">{versionDetail.created_at ? new Date(versionDetail.created_at).toLocaleString() : ''}</span>
                     </div>
-                    {versionDetail.tags?.length > 0 && (
-                      <div className="flex gap-1">
-                        {versionDetail.tags.map(t => <span key={t} className="px-2 py-0.5 bg-slate-100 rounded text-xs text-slate-600">{t}</span>)}
-                      </div>
-                    )}
-                  </div>
-                  {versionDetail.variables?.length > 0 && (
-                    <div className="mb-3 text-xs text-slate-500">
-                      Variables: {versionDetail.variables.map(v => <code key={v} className="px-1.5 py-0.5 bg-slate-100 rounded mx-0.5">{'{{'}{v}{'}}'}</code>)}
+                    <div className="flex items-center gap-2">
+                      {versionDetail.tags?.length > 0 && (
+                        <div className="flex gap-1">
+                          {versionDetail.tags.map(t => <span key={t} className="px-2 py-0.5 bg-slate-100 rounded text-xs text-slate-600">{t}</span>)}
+                        </div>
+                      )}
+                      <button onClick={() => setEditingVersion({ content: versionDetail.content || '', tags: (versionDetail.tags || []).join(', ') })}
+                        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-600" title="Edit version">
+                        <Pencil size={14} />
+                      </button>
+                      <button onClick={handleDeleteVersion}
+                        className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500" title="Delete version">
+                        <Trash2 size={14} />
+                      </button>
                     </div>
+                  </div>
+                  {editingVersion ? (
+                    <div className="space-y-3">
+                      <textarea value={editingVersion.content} onChange={e => setEditingVersion(p => ({ ...p, content: e.target.value }))}
+                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono" rows={12} />
+                      <input value={editingVersion.tags} onChange={e => setEditingVersion(p => ({ ...p, tags: e.target.value }))}
+                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" placeholder="Tags (comma-separated)" />
+                      <div className="flex gap-2">
+                        <button onClick={() => setEditingVersion(null)} className="px-3 py-1.5 text-sm text-slate-500">Cancel</button>
+                        <button onClick={handleUpdateVersion} disabled={saving || !editingVersion.content?.trim()}
+                          className="btn-brand text-sm px-4 py-1.5 disabled:opacity-50">
+                          {saving ? 'Saving...' : 'Save Version'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {versionDetail.variables?.length > 0 && (
+                        <div className="mb-3 text-xs text-slate-500">
+                          Variables: {versionDetail.variables.map(v => <code key={v} className="px-1.5 py-0.5 bg-slate-100 rounded mx-0.5">{'{{'}{v}{'}}'}</code>)}
+                        </div>
+                      )}
+                      <pre className="text-sm font-mono whitespace-pre-wrap text-slate-700 bg-slate-50 rounded-lg p-4 max-h-[600px] overflow-auto leading-relaxed">
+                        {versionDetail.content || 'No content'}
+                      </pre>
+                    </>
                   )}
-                  <pre className="text-sm font-mono whitespace-pre-wrap text-slate-700 bg-slate-50 rounded-lg p-4 max-h-[600px] overflow-auto leading-relaxed">
-                    {versionDetail.content || 'No content'}
-                  </pre>
                 </>
               ) : (
                 <div className="text-center py-12 text-slate-400">Select a version</div>

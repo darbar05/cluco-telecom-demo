@@ -2379,6 +2379,90 @@ class MongoTraceStore:
         b = self.get_prompt_version(prompt_id, version_b)
         return {"version_a": a, "version_b": b}
 
+    # ── Prompt Template / Version CRUD ────────────────────────────────
+
+    def _sync_prompt_template_from_versions(self, prompt_id: str):
+        """Recompute version_count and _latest_content from remaining versions."""
+        now = datetime.utcnow()
+        cursor = list(
+            self._prompt_template_versions
+            .find({"prompt_id": prompt_id})
+            .sort("version_number", -1)
+            .limit(1)
+        )
+        if not cursor:
+            self._prompt_templates.update_one(
+                {"prompt_id": prompt_id},
+                {"$set": {"version_count": 0, "_latest_content": "", "updated_at": now}},
+            )
+            return
+        latest = cursor[0]
+        max_ver = latest.get("version_number", 1)
+        self._prompt_templates.update_one(
+            {"prompt_id": prompt_id},
+            {"$set": {
+                "version_count": max_ver,
+                "_latest_content": latest.get("content", ""),
+                "updated_at": now,
+            }},
+        )
+
+    def update_prompt_template(self, prompt_id: str, name=None, description=None,
+                               agent_name=None, product_id=None) -> dict:
+        tmpl = self._prompt_templates.find_one({"prompt_id": prompt_id})
+        if not tmpl:
+            return None
+        updates = {"updated_at": datetime.utcnow()}
+        if name is not None:
+            updates["name"] = name
+        if description is not None:
+            updates["description"] = description
+        if agent_name is not None:
+            updates["agent_name"] = agent_name
+        if product_id is not None:
+            updates["product_id"] = product_id
+        self._prompt_templates.update_one({"prompt_id": prompt_id}, {"$set": updates})
+        return {"ok": True, "prompt_id": prompt_id}
+
+    def delete_prompt_template(self, prompt_id: str) -> dict:
+        self._prompt_template_versions.delete_many({"prompt_id": prompt_id})
+        r = self._prompt_templates.delete_one({"prompt_id": prompt_id})
+        return {"ok": r.deleted_count > 0}
+
+    def update_prompt_version(self, prompt_id: str, version_number: int,
+                              content=None, tags=None, variables=None, model=None) -> dict:
+        if not self.get_prompt_version(prompt_id, version_number):
+            return None
+        updates = {}
+        if content is not None:
+            updates["content"] = content
+        if tags is not None:
+            updates["tags"] = tags
+        if variables is not None:
+            updates["variables"] = variables
+        if model is not None:
+            updates["model"] = model
+        if not updates:
+            return {"ok": True, "prompt_id": prompt_id, "version_number": version_number}
+        self._prompt_template_versions.update_one(
+            {"prompt_id": prompt_id, "version_number": version_number},
+            {"$set": updates},
+        )
+        self._sync_prompt_template_from_versions(prompt_id)
+        return {"ok": True, "prompt_id": prompt_id, "version_number": version_number}
+
+    def delete_prompt_version(self, prompt_id: str, version_number: int) -> dict:
+        n = self._prompt_template_versions.count_documents({"prompt_id": prompt_id})
+        if n <= 1:
+            return {"ok": False, "error": "Cannot delete the only version. Delete the prompt template instead."}
+        r = self._prompt_template_versions.delete_one(
+            {"prompt_id": prompt_id, "version_number": version_number}
+        )
+        if r.deleted_count == 0:
+            return {"ok": False, "error": "Version not found"}
+        self._sync_prompt_template_from_versions(prompt_id)
+        return {"ok": True}
+
     # ── Score Configs ─────────────────────────────────────────────────
     def create_score_config(self, data: dict) -> dict:
         now = datetime.utcnow()
