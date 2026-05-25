@@ -30,11 +30,12 @@ services:
     plan: free
     branch: main
     repo: https://github.com/darbar05/cluco-telecom-demo
-    buildCommand: cd telecom-agent/frontend && npm ci && npm run build
-    staticPublishPath: ./telecom-agent/frontend/dist
+    rootDir: telecom-agent/frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
     envVars:
       - key: VITE_CHAT_API_URL
-        value: https://telecom-backend.onrender.com
+        value: https://telecom-backend-3i7z.onrender.com
       - key: VITE_CLUCO_API_URL
         value: https://cluco-obs-backend.onrender.com
       - key: VITE_CLUCO_UI_URL
