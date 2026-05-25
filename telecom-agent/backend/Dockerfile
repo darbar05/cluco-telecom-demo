@@ -2,10 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY telecom-agent/backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY cluco-observability/sdk /sdk/
+RUN pip install --no-cache-dir -e /sdk
+
+COPY telecom-agent/backend/ ./
 
 EXPOSE 9412
 

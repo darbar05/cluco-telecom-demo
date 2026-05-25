@@ -1,0 +1,41 @@
+# Telecom + Cluco services on Render (Blueprint)
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: telecom-backend
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    repo: https://github.com/darbar05/cluco-telecom-demo
+    dockerfilePath: ./telecom-agent/backend/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: CLUCO_OBS_BACKEND_URL
+        value: https://cluco-obs-backend.onrender.com
+      - key: CLUCO_OBS_PRODUCT_ID
+        value: telecom-agent
+      - key: PINECONE_INDEX_NAME
+        value: telecom-kb
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+
+  - type: web
+    name: telecom-ui
+    runtime: static
+    plan: free
+    branch: main
+    repo: https://github.com/darbar05/cluco-telecom-demo
+    buildCommand: cd telecom-agent/frontend && npm ci && npm run build
+    staticPublishPath: ./telecom-agent/frontend/dist
+    envVars:
+      - key: VITE_CHAT_API_URL
+        value: https://telecom-backend.onrender.com
+      - key: VITE_CLUCO_API_URL
+        value: https://cluco-obs-backend.onrender.com
+      - key: VITE_CLUCO_UI_URL
+        value: https://cluco-obs-ui.onrender.com
