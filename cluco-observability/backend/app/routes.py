@@ -579,7 +579,7 @@ def get_trace_assessments(trace_id: str) -> dict:
 def get_metrics(
     product_id: Optional[str] = Query(None),
     service_name: Optional[str] = Query(None),
-    days: int = Query(30, le=365),
+    days: int = Query(90, le=365),
 ) -> dict:
     from app.storage import get_trace_store
     store = get_trace_store()

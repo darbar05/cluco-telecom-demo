@@ -88,7 +88,7 @@ export default function SessionSidebar({
       {/* Footer */}
       <div className="px-4 py-3 border-t border-white/5">
         <a
-          href="http://localhost:9411"
+          href={import.meta.env.VITE_CLUCO_UI_URL || 'http://localhost:9411'}
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-2 text-xs text-slate-500 hover:text-telco-400 transition-colors"

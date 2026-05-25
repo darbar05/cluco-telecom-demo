@@ -119,9 +119,20 @@ export default function App() {
       setMessages(prev => [...prev, assistantMsg]);
       loadSessions();
     } catch (e) {
+      const detail = e.response?.data?.detail || e.message || '';
+      let content = 'Sorry, something went wrong. Please try again.';
+      if (typeof detail === 'string') {
+        if (detail.includes('insufficient_quota') || detail.includes('429')) {
+          content = 'OpenAI API quota exceeded. Add billing credits or update OPENAI_API_KEY on the telecom-backend Render service, then try again.';
+        } else if (detail.includes('Connection refused') || detail.includes('ECONNREFUSED')) {
+          content = 'Cannot reach Cluco Observability backend. Wait for cluco-obs-backend to wake up (free tier cold start), then try again.';
+        } else if (detail.length < 300) {
+          content = detail;
+        }
+      }
       const errorMsg = {
         role: 'assistant',
-        content: 'Sorry, something went wrong. Please make sure the backend server is running and try again.',
+        content,
         timestamp: new Date().toISOString(),
         error: true,
       };
@@ -266,7 +277,7 @@ export default function App() {
             </div>
             <p className="text-xs text-slate-500 text-center mt-2">
               Traces are sent to Cluco Observability for monitoring. Open{' '}
-              <a href="http://localhost:9411" target="_blank" rel="noopener noreferrer" className="text-telco-400 hover:underline">
+              <a href={import.meta.env.VITE_CLUCO_UI_URL || 'http://localhost:9411'} target="_blank" rel="noopener noreferrer" className="text-telco-400 hover:underline">
                 Cluco Dashboard
               </a>{' '}
               to inspect them.

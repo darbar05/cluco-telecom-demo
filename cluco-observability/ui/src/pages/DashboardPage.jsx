@@ -71,7 +71,7 @@ export default function DashboardPage() {
     setLoading(true)
     setApiError(null)
     Promise.all([
-      getMetrics(productFilter || undefined),
+      getMetrics(productFilter || undefined, { days: 90 }),
       getProducts(),
       getDashboards(productFilter || undefined),
       getAgentBreakdown({ product_id: productFilter || undefined }),

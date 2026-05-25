@@ -1,11 +1,14 @@
 import axios from 'axios'
 
-// Use full backend URL when set (e.g. production or backend on another host); otherwise use relative path so Vite proxy works in dev
+// Production static sites have no dev proxy — use VITE_API_URL or VITE_BACKEND_URL when set.
 const envUrl = import.meta.env.VITE_API_URL
+const backendUrl = import.meta.env.VITE_BACKEND_URL
 const API_BASE =
   (typeof envUrl === 'string' && envUrl.startsWith('http'))
-    ? envUrl.replace(/\/$/, '') // strip trailing slash
-    : '/api/v1'
+    ? envUrl.replace(/\/$/, '')
+    : (typeof backendUrl === 'string' && backendUrl.startsWith('http'))
+      ? `${backendUrl.replace(/\/$/, '')}/api/v1`
+      : '/api/v1'
 
 export const api = axios.create({
   baseURL: API_BASE,
@@ -36,7 +39,8 @@ export const debugTraceAssistant = (traceId, question, stream = false) =>
 export const getAgents = (productId) => api.get('/agents', { params: { product_id: productId } })
 export const getSessions = (params) => api.get('/sessions', { params })
 export const getAgentMetrics = (serviceName, productId) => api.get(`/agents/${serviceName}/metrics`, { params: { product_id: productId } })
-export const getMetrics = (productId) => api.get('/metrics', { params: { product_id: productId } })
+export const getMetrics = (productId, params = {}) =>
+  api.get('/metrics', { params: { product_id: productId, ...params } })
 export const getProducts = () => api.get('/products')
 export const getDashboards = (productId) => api.get('/dashboards', { params: { product_id: productId } })
 export const getDashboard = (id) => api.get(`/dashboards/${id}`)
