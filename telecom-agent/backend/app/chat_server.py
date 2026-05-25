@@ -34,7 +34,7 @@ try:
     )
     tracer = ClucoTracer(config=cluco_config)
     TRACING_ENABLED = True
-    print("Cluco tracing enabled.")
+    print(f"Cluco tracing enabled. Export URL: {cluco_config.backend_url}/api/v1/traces/ingest")
 except Exception as e:
     print(f"Cluco tracing not available: {e}")
     TRACING_ENABLED = False
@@ -313,6 +313,8 @@ def chat(req: ChatRequest):
                     "agent_version": current_agent_version,
                 },
             )
+            if getattr(tracer, "_exporter", None):
+                tracer._exporter._flush()
 
         timestamp = datetime.utcnow().isoformat()
         sessions[session_id]["messages"].append({

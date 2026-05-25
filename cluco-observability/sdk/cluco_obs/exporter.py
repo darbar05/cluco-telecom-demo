@@ -61,26 +61,34 @@ class AsyncHTTPExporter:
             self._send(chunk)
 
     def _send(self, traces: list) -> None:
-        try:
-            import urllib.request
+        import urllib.error
+        import urllib.request
 
-            def _default_ser(o):
-                """Fallback for json.dumps — convert any non-serializable object to string."""
-                if hasattr(o, "value"):
-                    return o.value
-                if hasattr(o, "isoformat"):
-                    return o.isoformat()
-                return str(o)
+        def _default_ser(o):
+            """Fallback for json.dumps — convert any non-serializable object to string."""
+            if hasattr(o, "value"):
+                return o.value
+            if hasattr(o, "isoformat"):
+                return o.isoformat()
+            return str(o)
 
-            data = json.dumps({"traces": traces}, default=_default_ser).encode("utf-8")
-            req = urllib.request.Request(
-                self._url,
-                data=data,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                if resp.status >= 400:
-                    logger.warning("Cluco obs export failed: HTTP %d", resp.status)
-        except Exception as e:
-            logger.warning("Cluco obs export error: %s", e)
+        data = json.dumps({"traces": traces}, default=_default_ser).encode("utf-8")
+        delays = (0.0, 1.0, 2.0)
+        last_err = None
+        for delay in delays:
+            if delay:
+                time.sleep(delay)
+            try:
+                req = urllib.request.Request(
+                    self._url,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status >= 400:
+                        logger.warning("Cluco obs export failed: HTTP %d", resp.status)
+                    return
+            except Exception as e:
+                last_err = e
+        logger.warning("Cluco obs export error: %s", last_err)

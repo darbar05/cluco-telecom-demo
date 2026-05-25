@@ -17,6 +17,8 @@ services:
         value: https://cluco-obs-backend.onrender.com
       - key: CLUCO_OBS_PRODUCT_ID
         value: telecom-agent
+      - key: CLUCO_OBS_ENVIRONMENT
+        value: production
       - key: PINECONE_INDEX_NAME
         value: telecom-kb
       - key: OPENAI_API_KEY
